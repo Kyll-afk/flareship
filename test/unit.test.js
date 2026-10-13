@@ -5,7 +5,7 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { ApiError, createClient } from '../src/api.js';
 import { parseArgs } from '../src/cli.js';
-import { cleanFolder, deploymentState, findProjectForRepo, sanitizeName } from '../src/commands.js';
+import { cleanFolder, deploymentState, extractAccountId, findProjectForRepo, sanitizeName } from '../src/commands.js';
 import { detect } from '../src/detect.js';
 import { Fail } from '../src/errors.js';
 import { parseRemote } from '../src/git.js';
@@ -44,6 +44,17 @@ test('sanitizeName produces a valid Pages project name', () => {
   assert.equal(sanitizeName('___'), 'site');
   assert.equal(sanitizeName('a'.repeat(80)).length, 58);
   assert.equal(sanitizeName(`${'a'.repeat(57)}-b`), 'a'.repeat(57));
+});
+
+test('extractAccountId accepts a bare ID or any dashboard address', () => {
+  const id = '2824bd06346d60f4326fddc0142d811c';
+  assert.equal(extractAccountId(id), id);
+  assert.equal(extractAccountId(`  ${id.toUpperCase()}  `), id);
+  assert.equal(extractAccountId(`https://dash.cloudflare.com/${id}/workers-and-pages`), id);
+  assert.equal(extractAccountId(`https://dash.cloudflare.com/${id}/pages/view/ziffy-site?tab=settings`), id);
+  assert.equal(extractAccountId('https://dash.cloudflare.com/profile/api-tokens'), null);
+  assert.equal(extractAccountId(`${id}0`), null);
+  assert.equal(extractAccountId(''), null);
 });
 
 test('cleanFolder normalises the publish folder', () => {

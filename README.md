@@ -60,6 +60,8 @@ Or without installing: `npx github:Kyll-afk/flareship import`.
 `flareship guide` prints this same walkthrough in the terminal, and `flareship import`
 walks you through steps 2 to 4 when something is missing.
 
+Short version, once the repository is on GitHub: `flareship login`, then `flareship import`.
+
 ### 1. Put the project on GitHub or GitLab
 
 Cloudflare builds what is on the remote, not what is on your machine.
@@ -69,22 +71,26 @@ git remote -v              # must show an "origin" on github.com or gitlab.com
 git push -u origin main
 ```
 
-### 2. Create a Cloudflare API token (once per machine)
+### 2. Sign in to Cloudflare (once per machine)
 
-1. Open <https://dash.cloudflare.com/profile/api-tokens>.
-2. **Create Token** → **Custom token** → **Get started**.
-3. Permissions: **Account** | **Cloudflare Pages** | **Edit**.
-4. Account Resources: **Include** | your account.
-5. **Continue to summary** → **Create Token**, then copy it. It is shown only once.
-6. Run `flareship login` and paste it. The input is hidden.
+```bash
+flareship login
+```
 
-If the token cannot list accounts, `login` asks for the **Account ID**. It is on
-<https://dash.cloudflare.com/?to=/:account/workers-and-pages>, in the right column under
-"Account details".
+Your browser opens on Cloudflare: click **Allow**. There is no token to create and no
+Account ID to copy.
 
-The token and account ID are saved in `~/.config/flareship/config.json`
-(`%APPDATA%\flareship\config.json` on Windows), readable only by you. `flareship logout`
-deletes the file.
+This is Cloudflare's own sign-in, the one its `wrangler` CLI uses; `flareship` runs it
+through `npx wrangler@4` and asks wrangler for the session each time it needs one, so no
+secret is stored by `flareship` itself. If wrangler is already signed in on the machine,
+you can skip this step: every command just works. `flareship` only remembers which account
+to use, in `~/.config/flareship/config.json` (`%APPDATA%\flareship\config.json` on Windows).
+
+`flareship whoami` shows how you are signed in. `flareship logout` forgets the saved
+account; `npx wrangler logout` ends the Cloudflare sign-in itself.
+
+For scripts and CI, where no browser is available, use an API token: see
+[Scripts and CI](#scripts-and-ci).
 
 ### 3. Let Cloudflare read the repository
 
@@ -121,7 +127,7 @@ the first build, follows its log and prints the live address.
 | `flareship deploy` | Rebuilds without a new commit. `--branch <name>` builds a preview. |
 | `flareship open` | Opens the live site in the browser. |
 | `flareship list` | Every Pages project in the account and where it comes from. |
-| `flareship whoami` | Which token and account are in use. |
+| `flareship whoami` | How you are signed in and to which account. |
 
 ## Build detection
 
@@ -165,16 +171,40 @@ flareship import --build "python3 tools/dist.py" --out dist
 | `--no-previews` | Do not build preview deployments for other branches. |
 | `-y`, `--yes` | Accept the detected settings without asking. |
 | `-f`, `--follow` | Keep following a running build (`logs`). |
+| `--token` | With `login`: save an API token instead of signing in through the browser. |
 
 ## Scripts and CI
 
-Environment variables win over the saved login, so nothing has to be stored on the machine:
+Without a browser, authenticate with an API token. Environment variables win over
+everything else, so nothing has to be stored on the machine:
 
 ```bash
 export CLOUDFLARE_API_TOKEN=...
 export CLOUDFLARE_ACCOUNT_ID=...
 flareship import --yes --build "npm run build" --out dist
 ```
+
+To create the token:
+
+1. Open <https://dash.cloudflare.com/profile/api-tokens>.
+2. **Create Token** → **Custom token** → **Get started**. Do not use one of the templates:
+   they grant far more than this tool needs.
+3. Add exactly two permissions:
+   - **Account** | **Cloudflare Pages** | **Edit**
+   - **Account** | **Account Settings** | **Read**
+4. Account Resources: **Include** | your account.
+5. **Continue to summary**, check that only those two permissions are listed, then
+   **Create Token** and copy it. It is shown only once.
+
+**Account Settings: Read** lets `flareship` find the account by itself. Without it, set
+`CLOUDFLARE_ACCOUNT_ID`; the ID is the 32-character part of any dashboard address, such as
+<https://dash.cloudflare.com/?to=/:account/workers-and-pages> after it redirects.
+
+`flareship login --token` saves a token on a machine instead of using the browser. It asks
+for the token with hidden input and, if needed, for the account: paste a dashboard address
+or the bare ID.
+
+Set `FLARESHIP_NO_WRANGLER=1` to make sure the browser sign-in is never used.
 
 Without a terminal attached, `flareship` never asks questions: it uses the options and the
 detected settings, and fails with a clear message when it would have to guess.
@@ -184,15 +214,18 @@ detected settings, and fails with a clear message when it would have to guess.
 | Message | Cause and fix |
 |---|---|
 | `Cloudflare has no access to github.com/...` | Step 3 was not done for this repository. Follow the links it prints. |
-| `Authentication error` | The token is wrong, expired, or lacks **Cloudflare Pages: Edit**. Run `flareship login` again. |
-| `This token cannot list accounts` | Normal for a Pages-only token. Enter the Account ID in `flareship login` or set `CLOUDFLARE_ACCOUNT_ID`. |
+| `Not signed in to Cloudflare` | Run `flareship login`. In scripts, set `CLOUDFLARE_API_TOKEN`. |
+| `Authentication error` | An API token is wrong, expired, or lacks **Cloudflare Pages: Edit**. Check `flareship whoami`; a `CLOUDFLARE_API_TOKEN` in the environment wins over the browser sign-in. |
+| `This token cannot find your account by itself` | The token lacks **Account Settings: Read**. Paste a dashboard address when `login --token` asks, or set `CLOUDFLARE_ACCOUNT_ID`. |
+| The first command is slow | `npx` is downloading wrangler. It is cached after that. |
 | `Could not detect the build settings` | Pass `--build` and `--out`. |
 | `A project with this name already exists` | Pick another with `--name`. |
 | The build fails | The log is printed in full. Fix the project, push, and Cloudflare builds again on its own. |
 
 ## Reference links
 
-- Cloudflare API tokens: <https://dash.cloudflare.com/profile/api-tokens>
+- Cloudflare API tokens (scripts and CI only): <https://dash.cloudflare.com/profile/api-tokens>
+- wrangler sign-in docs: <https://developers.cloudflare.com/workers/wrangler/commands/#login>
 - Workers & Pages in the dashboard (Account ID, projects): <https://dash.cloudflare.com/?to=/:account/workers-and-pages>
 - Cloudflare's GitHub app (repository access): <https://github.com/settings/installations>
 - Pages Git integration docs: <https://developers.cloudflare.com/pages/configuration/git-integration/>

@@ -100,6 +100,7 @@ async function flareship(cwd, argv, extraEnv = {}) {
     FLARESHIP_POLL_MS: '5',
     FLARESHIP_CONFIG: path.join(os.tmpdir(), 'flareship-test-missing-config.json'),
     FLARESHIP_NO_BROWSER: '1',
+    FLARESHIP_NO_WRANGLER: '1',
     ...extraEnv,
   };
   const code = await run(argv, { cwd, env, interactive: false, log: (line) => lines.push(String(line)), err: (line) => lines.push(String(line)) });
@@ -204,7 +205,8 @@ test('help and guide print without touching the network', async () => {
   const help = await flareship(os.tmpdir(), []);
   assert.match(help.output, /flareship import/);
   const guide = await flareship(os.tmpdir(), ['guide']);
-  assert.match(guide.output, /dash\.cloudflare\.com\/profile\/api-tokens/);
+  assert.match(guide.output, /flareship login/);
+  assert.match(guide.output, /workers-and-pages\/create\/pages/);
   assert.match(guide.output, /github\.com\/settings\/installations/);
   assert.equal(state.requests.length, count);
 });

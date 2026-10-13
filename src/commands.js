@@ -6,6 +6,7 @@ import { clearConfig, configPath, loadConfig, saveConfig } from './config.js';
 import { detect } from './detect.js';
 import { Fail } from './errors.js';
 import { readRepo } from './git.js';
+import { wranglerLogin, wranglerToken } from './wrangler.js';
 import { ago, ask, askSecret, bold, confirm, cyan, dim, green, red, yellow } from './ui.js';
 
 const NO_GIT_ACCESS = 8000011;
@@ -21,9 +22,10 @@ Usage
   flareship logs [id]         print a deployment's build log (latest by default)
   flareship open              open the live site in the browser
   flareship list              list every Pages project in the account
-  flareship login             save a Cloudflare API token on this machine
-  flareship logout            remove the saved token
-  flareship whoami            show which token and account are in use
+  flareship login             sign in to Cloudflare through the browser
+  flareship login --token     use an API token instead (scripts, CI)
+  flareship logout            forget the saved account or token
+  flareship whoami            show how you are signed in and to which account
 
 Options
   --name <name>       project name (default: the repository name)
@@ -38,9 +40,10 @@ Options
   -v, --version       show the version
 
 Authentication
-  CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID are read from the environment
-  and win over the values saved by "flareship login". The token needs the
-  "Cloudflare Pages: Edit" permission.`;
+  "flareship login" opens the browser (Cloudflare's own wrangler sign-in): no
+  token to create and no Account ID to copy. For scripts, CLOUDFLARE_API_TOKEN
+  and CLOUDFLARE_ACCOUNT_ID are read from the environment and win over it; the
+  token needs the "Cloudflare Pages: Edit" permission.`;
 
 export function sanitizeName(raw) {
   const name = String(raw ?? '')
@@ -70,6 +73,11 @@ export function deploymentState(deployment) {
   return 'running';
 }
 
+export function extractAccountId(value) {
+  const match = String(value ?? '').match(/(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])/i);
+  return match ? match[0].toLowerCase() : null;
+}
+
 export function cleanFolder(value) {
   const folder = String(value ?? '').trim().replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '');
   return folder === '.' ? '' : folder;
@@ -94,15 +102,12 @@ export const GUIDE = `flareship setup, step by step
      git remote -v        must show an "origin" on github.com or gitlab.com
      git push -u origin main
 
-2. Create a Cloudflare API token (once per machine)
-   Open ${LINKS.tokens}
-     Create Token -> Custom token -> Get started
-     Permissions:        Account | Cloudflare Pages | Edit
-     Account Resources:  Include | your account
-     Continue to summary -> Create Token -> copy it (it is shown only once)
-   Then run:  flareship login
-   The Account ID it may ask for is on ${LINKS.accountHome}
-   (right column, "Account details").
+2. Sign in to Cloudflare (once per machine)
+   Run:  flareship login
+   Your browser opens on Cloudflare: click "Allow". There is no token to create
+   and no Account ID to copy. It uses Cloudflare's own wrangler sign-in, so if
+   wrangler is already signed in on this machine you can skip this step.
+   Scripts and CI use an API token instead:  flareship login --token
 
 3. Let Cloudflare read the repository (once per repository, or once for all)
    First time ever: open ${LINKS.connectGit()}
@@ -131,22 +136,31 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function session(ctx) {
   const config = loadConfig(ctx.env);
-  const token = ctx.env.CLOUDFLARE_API_TOKEN || config.token;
+  let token = ctx.env.CLOUDFLARE_API_TOKEN || config.token;
+  let source = ctx.env.CLOUDFLARE_API_TOKEN ? 'env' : config.token ? 'token' : null;
+  if (!token && !ctx.env.FLARESHIP_NO_WRANGLER) {
+    token = wranglerToken(ctx.env);
+    if (token) source = 'browser';
+  }
   if (!token) {
-    if (!ctx.interactive) throw new Fail('No Cloudflare API token found. Run "flareship login" or set CLOUDFLARE_API_TOKEN.');
-    ctx.log('No Cloudflare API token on this machine yet. Setting one up:');
+    if (!ctx.interactive) throw new Fail('Not signed in to Cloudflare. Run "flareship login" or set CLOUDFLARE_API_TOKEN.');
+    ctx.log('Not signed in to Cloudflare on this machine yet.');
     return loginFlow(ctx);
   }
   const client = createClient({ token, base: ctx.env.FLARESHIP_API_BASE });
-  const accountId = ctx.env.CLOUDFLARE_ACCOUNT_ID || config.accountId || (await pickAccount(ctx, client));
-  return { client, accountId };
+  let accountId = ctx.env.CLOUDFLARE_ACCOUNT_ID || config.accountId;
+  if (!accountId) {
+    accountId = await pickAccount(ctx, client);
+    saveConfig({ ...config, accountId }, ctx.env);
+  }
+  return { client, accountId, source };
 }
 
 async function pickAccount(ctx, client) {
   const accounts = await client.listAccounts();
   if (accounts.length === 1) return accounts[0].id;
   if (accounts.length === 0) {
-    throw new Fail('This token cannot list accounts. Set CLOUDFLARE_ACCOUNT_ID or run "flareship login" and enter the account ID.');
+    throw new Fail('This token cannot list accounts. Set CLOUDFLARE_ACCOUNT_ID or run "flareship login --token" and enter the account.');
   }
   const lines = accounts.map((a, i) => `  ${i + 1}. ${a.name} ${dim(a.id)}`).join('\n');
   if (!ctx.prompts) throw new Fail(`This token can see several accounts. Set CLOUDFLARE_ACCOUNT_ID to one of:\n${lines}`);
@@ -433,11 +447,32 @@ async function openCommand(ctx) {
   return 0;
 }
 
-async function loginFlow(ctx) {
+async function browserLogin(ctx) {
+  let token = wranglerToken(ctx.env);
+  if (token) {
+    ctx.log('Cloudflare is already signed in on this machine (wrangler).');
+  } else {
+    ctx.log('Opening your browser to sign in to Cloudflare. Click "Allow" there.');
+    if (!wranglerLogin(ctx.env)) throw new Fail('The browser sign-in did not finish. Run "flareship login" again, or use "flareship login --token".');
+    token = wranglerToken(ctx.env);
+    if (!token) throw new Fail('Signed in, but the session could not be read back. Try "flareship login --token".');
+  }
+  const client = createClient({ token, base: ctx.env.FLARESHIP_API_BASE });
+  const accountId = ctx.env.CLOUDFLARE_ACCOUNT_ID || (await pickAccount(ctx, client));
+  await client.listProjects(accountId);
+  saveConfig({ auth: 'browser', accountId }, ctx.env);
+  ctx.log(`${green('signed in')} account ${dim(accountId)}`);
+  return { client, accountId, source: 'browser' };
+}
+
+async function tokenLogin(ctx) {
   ctx.log(`  1. Open ${cyan(LINKS.tokens)}`);
-  ctx.log('  2. Create Token -> Custom token -> Permissions: Account | Cloudflare Pages | Edit');
-  ctx.log('  3. Account Resources: Include | your account -> Continue to summary -> Create Token');
-  ctx.log('  4. Copy the token (it is shown only once)');
+  ctx.log('  2. Create Token -> Custom token -> Get started  (not one of the templates)');
+  ctx.log('  3. Add exactly two permissions:');
+  ctx.log('       Account | Cloudflare Pages | Edit');
+  ctx.log('       Account | Account Settings | Read');
+  ctx.log('  4. Account Resources: Include | your account -> Continue to summary');
+  ctx.log('  5. Check that only those two permissions are listed -> Create Token -> copy it');
   const token = await askSecret('Paste the token (hidden)');
   if (!token) throw new Fail('No token entered.');
 
@@ -453,9 +488,12 @@ async function loginFlow(ctx) {
       ctx.log(`Using account ${bold(accounts[0].name)}`);
     } else {
       if (accounts.length > 1) for (const account of accounts) ctx.log(`  ${account.name} ${dim(account.id)}`);
-      else ctx.log(`This token cannot list accounts. Copy the Account ID from ${cyan(LINKS.accountHome)} (right column).`);
-      accountId = await ask('Account ID');
-      if (!accountId) throw new Fail('No account ID entered.');
+      else {
+        ctx.log('This token cannot find your account by itself (it lacks "Account Settings: Read").');
+        ctx.log(`Open ${cyan(LINKS.accountHome)} and copy the address from the browser's address bar.`);
+      }
+      accountId = extractAccountId(await ask('Paste that address, or the Account ID'));
+      if (!accountId) throw new Fail('That does not contain an Account ID (32 letters and digits).');
     }
   }
 
@@ -469,11 +507,16 @@ async function loginFlow(ctx) {
   }
   const file = saveConfig({ token, accountId }, ctx.env);
   ctx.log(`${green('saved')} ${file}`);
-  return { client, accountId };
+  return { client, accountId, source: 'token' };
+}
+
+function loginFlow(ctx) {
+  return ctx.flags.token ? tokenLogin(ctx) : browserLogin(ctx);
 }
 
 async function loginCommand(ctx) {
   if (!ctx.interactive) throw new Fail('"flareship login" needs a terminal. In scripts, set CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.');
+  if (ctx.env.FLARESHIP_NO_WRANGLER && !ctx.flags.token) throw new Fail('Browser sign-in is turned off (FLARESHIP_NO_WRANGLER). Use "flareship login --token".');
   await loginFlow(ctx);
   ctx.log('Next: run "flareship import" inside a repository.');
   return 0;
@@ -486,17 +529,17 @@ async function guideCommand(ctx) {
 
 async function logoutCommand(ctx) {
   ctx.log(clearConfig(ctx.env) ? `Removed ${configPath(ctx.env)}` : 'Nothing was saved.');
+  ctx.log('The Cloudflare browser sign-in belongs to wrangler. To end it too, run: npx wrangler logout');
   return 0;
 }
 
 async function whoamiCommand(ctx) {
-  const config = loadConfig(ctx.env);
-  const fromEnv = Boolean(ctx.env.CLOUDFLARE_API_TOKEN);
-  const { client, accountId } = await session(ctx);
+  const { client, accountId, source } = await session(ctx);
   const projects = await client.listProjects(accountId);
-  ctx.log(`token    ${fromEnv ? 'CLOUDFLARE_API_TOKEN' : configPath(ctx.env)}`);
-  ctx.log(`account  ${accountId}${ctx.env.CLOUDFLARE_ACCOUNT_ID ? '' : config.accountId ? '' : dim('  (the only one this token can see)')}`);
-  ctx.log(`projects ${projects.length}`);
+  const how = { env: 'CLOUDFLARE_API_TOKEN', token: `API token saved in ${configPath(ctx.env)}`, browser: 'Cloudflare browser sign-in (wrangler)' }[source];
+  ctx.log(`signed in  ${how}`);
+  ctx.log(`account    ${accountId}`);
+  ctx.log(`projects   ${projects.length}`);
   return 0;
 }
 

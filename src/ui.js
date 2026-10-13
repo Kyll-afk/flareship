@@ -14,10 +14,12 @@ function question(prompt, { hidden = false } = {}) {
   return new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
     if (hidden) {
-      process.stdout.write(prompt);
-      rl._writeToOutput = () => {};
+      const write = rl._writeToOutput.bind(rl);
+      rl._writeToOutput = (text) => {
+        if (String(text).startsWith(prompt)) write(prompt);
+      };
     }
-    rl.question(hidden ? '' : prompt, (answer) => {
+    rl.question(prompt, (answer) => {
       rl.close();
       if (hidden) process.stdout.write('\n');
       resolve(answer.trim());
