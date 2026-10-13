@@ -1,0 +1,27 @@
+{
+  "name": "flareship",
+  "version": "0.1.0",
+  "description": "Import a Git repository into Cloudflare Pages from the terminal: push-to-deploy in one command.",
+  "type": "module",
+  "bin": {
+    "flareship": "bin/flareship.js"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "keywords": [
+    "cloudflare",
+    "pages",
+    "deploy",
+    "cli"
+  ],
+  "license": "UNLICENSED"
+}
