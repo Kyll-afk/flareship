@@ -175,3 +175,27 @@ test('the API client reports network failures as ApiError', async () => {
   });
   await assert.rejects(() => client.listAccounts(), (error) => error instanceof ApiError && /Could not reach Cloudflare/.test(error.message));
 });
+
+test('the API client fetches a fresh token once when the cached one is rejected', async () => {
+  const used = [];
+  let refreshes = 0;
+  const fetchImpl = async (url, init) => {
+    used.push(init.headers.Authorization);
+    if (init.headers.Authorization === 'Bearer stale') {
+      return { ok: false, status: 403, json: async () => ({ success: false, errors: [{ code: 10000, message: 'Authentication error' }] }) };
+    }
+    return { ok: true, status: 200, json: async () => ({ success: true, result: [{ id: 'a', name: 'A' }] }) };
+  };
+  const refresh = async () => {
+    refreshes += 1;
+    return 'fresh';
+  };
+  const client = createClient({ token: 'stale', refresh, fetchImpl });
+  assert.deepEqual(await client.listAccounts(), [{ id: 'a', name: 'A' }]);
+  assert.deepEqual(await client.listAccounts(), [{ id: 'a', name: 'A' }]);
+  assert.deepEqual(used, ['Bearer stale', 'Bearer fresh', 'Bearer fresh']);
+  assert.equal(refreshes, 1);
+
+  const stuck = createClient({ token: 'stale', refresh: async () => 'stale', fetchImpl });
+  await assert.rejects(() => stuck.listAccounts(), /Authentication error/);
+});

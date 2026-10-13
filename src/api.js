@@ -13,15 +13,36 @@ export class ApiError extends Error {
   }
 }
 
-export function createClient({ token, base, fetchImpl = globalThis.fetch }) {
-  const root = (base || DEFAULT_BASE).replace(/\/+$/, '');
+const AUTH_CODES = [10000, 10001, 9106, 9109];
 
-  async function request(method, path, { query, body, form } = {}) {
+export function isAuthError(error) {
+  return error instanceof ApiError && (error.status === 401 || error.status === 403 || AUTH_CODES.some((code) => error.has(code)));
+}
+
+export function createClient({ token, base, refresh, fetchImpl = globalThis.fetch }) {
+  const root = (base || DEFAULT_BASE).replace(/\/+$/, '');
+  let current = token;
+  let refreshed = false;
+
+  async function request(method, path, options) {
+    try {
+      return await send(method, path, options);
+    } catch (error) {
+      if (!refresh || refreshed || !isAuthError(error)) throw error;
+      refreshed = true;
+      const next = await refresh();
+      if (!next || next === current) throw error;
+      current = next;
+      return send(method, path, options);
+    }
+  }
+
+  async function send(method, path, { query, body, form } = {}) {
     const url = new URL(root + path);
     for (const [key, value] of Object.entries(query || {})) {
       if (value !== undefined) url.searchParams.set(key, String(value));
     }
-    const headers = { Authorization: `Bearer ${token}` };
+    const headers = { Authorization: `Bearer ${current}` };
     let payload;
     if (form) {
       payload = form;

@@ -2,7 +2,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { ApiError, createClient } from './api.js';
-import { clearConfig, configPath, loadConfig, saveConfig } from './config.js';
+import { clearConfig, clearSession, configPath, loadConfig, loadSession, saveConfig, saveSession } from './config.js';
 import { detect } from './detect.js';
 import { Fail } from './errors.js';
 import { readRepo } from './git.js';
@@ -11,6 +11,7 @@ import { ago, ask, askSecret, bold, busy, columns, confirm, cyan, dim, fields, g
 
 const NO_GIT_ACCESS = 8000011;
 const TAIL_LIMIT_MS = 20 * 60 * 1000;
+const SESSION_TTL_MS = 50 * 60 * 1000;
 const STAGES = {
   queued: 'Waiting in the build queue',
   initialize: 'Preparing the build machine',
@@ -144,12 +145,23 @@ const siteUrl = (project) => `https://${project.subdomain || `${project.name}.pa
 const repoLabel = (remote) => `${remote.type}.com/${remote.owner}/${remote.repo}`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+async function browserToken(ctx, { fresh = false } = {}) {
+  if (!fresh) {
+    const cached = loadSession(ctx.env);
+    if (cached.token && Date.now() - cached.savedAt < SESSION_TTL_MS) return cached.token;
+  }
+  const token = await busy('Checking the Cloudflare sign-in', () => wranglerToken(ctx.env));
+  if (token) saveSession({ token, savedAt: Date.now() }, ctx.env);
+  else clearSession(ctx.env);
+  return token;
+}
+
 async function session(ctx) {
   const config = loadConfig(ctx.env);
   let token = ctx.env.CLOUDFLARE_API_TOKEN || config.token;
   let source = ctx.env.CLOUDFLARE_API_TOKEN ? 'env' : config.token ? 'token' : null;
   if (!token && !ctx.env.FLARESHIP_NO_WRANGLER) {
-    token = await busy('Checking the Cloudflare sign-in', () => wranglerToken(ctx.env));
+    token = await browserToken(ctx);
     if (token) source = 'browser';
   }
   if (!token) {
@@ -157,7 +169,8 @@ async function session(ctx) {
     ctx.log(`${IN}Not signed in to Cloudflare on this machine yet.`);
     return loginFlow(ctx);
   }
-  const client = createClient({ token, base: ctx.env.FLARESHIP_API_BASE });
+  const refresh = source === 'browser' ? () => browserToken(ctx, { fresh: true }) : undefined;
+  const client = createClient({ token, base: ctx.env.FLARESHIP_API_BASE, refresh });
   let accountId = ctx.env.CLOUDFLARE_ACCOUNT_ID || config.accountId;
   if (!accountId) {
     accountId = await pickAccount(ctx, client);
@@ -527,14 +540,14 @@ async function openCommand(ctx) {
 }
 
 async function browserLogin(ctx) {
-  let token = await busy('Checking the Cloudflare sign-in', () => wranglerToken(ctx.env));
+  let token = await browserToken(ctx, { fresh: true });
   if (token) {
     ctx.log(`  Cloudflare is already signed in on this machine ${dim('(wrangler)')}`);
   } else {
     ctx.log('  Opening your browser to sign in to Cloudflare. Click "Allow" there.');
     ctx.log(dim('  The first time, this downloads Cloudflare\'s wrangler and can take a minute.'));
     if (!(await wranglerLogin(ctx.env))) throw new Fail('The browser sign-in did not finish. Run "flareship login" again, or use "flareship login --token".');
-    token = await busy('Reading the new session', () => wranglerToken(ctx.env));
+    token = await browserToken(ctx, { fresh: true });
     if (!token) throw new Fail('Signed in, but the session could not be read back. Try "flareship login --token".');
   }
   const client = createClient({ token, base: ctx.env.FLARESHIP_API_BASE });
@@ -612,6 +625,7 @@ async function guideCommand(ctx) {
 
 async function logoutCommand(ctx) {
   ctx.log('');
+  clearSession(ctx.env);
   ctx.log(clearConfig(ctx.env) ? ok(`Removed ${configPath(ctx.env)}`) : '  Nothing was saved.');
   ctx.log(dim('  The Cloudflare browser sign-in belongs to wrangler. To end it too, run: npx wrangler logout'));
   ctx.log('');

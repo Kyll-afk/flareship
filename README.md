@@ -99,10 +99,14 @@ Your browser opens on Cloudflare: click **Allow**. There is no token to create a
 Account ID to copy.
 
 This is Cloudflare's own sign-in, the one its `wrangler` CLI uses; `flareship` runs it
-through `npx wrangler@4` and asks wrangler for the session each time it needs one, so no
-secret is stored by `flareship` itself. If wrangler is already signed in on the machine,
-you can skip this step: every command just works. `flareship` only remembers which account
-to use, in `~/.config/flareship/config.json` (`%APPDATA%\flareship\config.json` on Windows).
+through `npx wrangler@4`. If wrangler is already signed in on the machine, you can skip
+this step: every command just works.
+
+Asking wrangler for the session takes a few seconds, so `flareship` does it at most once
+every 50 minutes and keeps the short-lived session token in between, next to the account it
+should use, in `~/.config/flareship/` (`%APPDATA%\flareship\` on Windows), readable only by
+you. If Cloudflare rejects a kept token, `flareship` fetches a new one by itself and retries.
+`flareship logout` deletes both files.
 
 `flareship whoami` shows how you are signed in. `flareship logout` forgets the saved
 account; `npx wrangler logout` ends the Cloudflare sign-in itself.

@@ -32,3 +32,28 @@ export function clearConfig(env = process.env) {
   fs.rmSync(file);
   return true;
 }
+
+function sessionPath(env = process.env) {
+  return path.join(path.dirname(configPath(env)), 'session.json');
+}
+
+export function loadSession(env = process.env) {
+  try {
+    return JSON.parse(fs.readFileSync(sessionPath(env), 'utf8')) || {};
+  } catch {
+    return {};
+  }
+}
+
+export function saveSession(session, env = process.env) {
+  const file = sessionPath(env);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(session) + '\n', { mode: 0o600 });
+  try {
+    fs.chmodSync(file, 0o600);
+  } catch {}
+}
+
+export function clearSession(env = process.env) {
+  fs.rmSync(sessionPath(env), { force: true });
+}
