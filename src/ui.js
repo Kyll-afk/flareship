@@ -51,3 +51,44 @@ export function ago(date, now = Date.now()) {
   if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
   return `${Math.round(seconds / 86400)}d ago`;
 }
+
+const FRAMES =
+  process.platform === 'win32' && !process.env.WT_SESSION
+    ? ['|', '/', '-', '\\']
+    : ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+export function spinner(label) {
+  const stream = process.stderr;
+  if (!stream.isTTY || process.env.CI || process.env.FLARESHIP_NO_SPINNER) {
+    return { text() {}, clear() {}, stop() {} };
+  }
+  const started = Date.now();
+  let frame = 0;
+  let current = label;
+  const clear = () => stream.write('\r\x1b[2K');
+  const draw = () => {
+    const seconds = Math.floor((Date.now() - started) / 1000);
+    stream.write(`\r\x1b[2K${FRAMES[frame++ % FRAMES.length]} ${current}${seconds >= 2 ? `  ${seconds}s` : ''}`);
+  };
+  draw();
+  const timer = setInterval(draw, 90);
+  return {
+    text(next) {
+      current = next;
+    },
+    clear,
+    stop() {
+      clearInterval(timer);
+      clear();
+    },
+  };
+}
+
+export async function busy(label, task) {
+  const progress = spinner(label);
+  try {
+    return await task();
+  } finally {
+    progress.stop();
+  }
+}

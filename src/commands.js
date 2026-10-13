@@ -7,10 +7,17 @@ import { detect } from './detect.js';
 import { Fail } from './errors.js';
 import { readRepo } from './git.js';
 import { wranglerLogin, wranglerToken } from './wrangler.js';
-import { ago, ask, askSecret, bold, confirm, cyan, dim, green, red, yellow } from './ui.js';
+import { ago, ask, askSecret, bold, busy, confirm, cyan, dim, green, red, spinner, yellow } from './ui.js';
 
 const NO_GIT_ACCESS = 8000011;
 const TAIL_LIMIT_MS = 20 * 60 * 1000;
+const STAGES = {
+  queued: 'Waiting in the build queue',
+  initialize: 'Preparing the build machine',
+  clone_repo: 'Cloning the repository',
+  build: 'Building the site',
+  deploy: 'Publishing to Cloudflare',
+};
 
 export const HELP = `flareship: connect a Git repository to Cloudflare Pages from the terminal
 
@@ -139,7 +146,7 @@ async function session(ctx) {
   let token = ctx.env.CLOUDFLARE_API_TOKEN || config.token;
   let source = ctx.env.CLOUDFLARE_API_TOKEN ? 'env' : config.token ? 'token' : null;
   if (!token && !ctx.env.FLARESHIP_NO_WRANGLER) {
-    token = wranglerToken(ctx.env);
+    token = await busy('Checking the Cloudflare sign-in', () => wranglerToken(ctx.env));
     if (token) source = 'browser';
   }
   if (!token) {
@@ -157,7 +164,7 @@ async function session(ctx) {
 }
 
 async function pickAccount(ctx, client) {
-  const accounts = await client.listAccounts();
+  const accounts = await busy('Finding your Cloudflare account', () => client.listAccounts());
   if (accounts.length === 1) return accounts[0].id;
   if (accounts.length === 0) {
     throw new Fail('This token cannot list accounts. Set CLOUDFLARE_ACCOUNT_ID or run "flareship login --token" and enter the account.');
@@ -180,9 +187,10 @@ function requireRepo(ctx) {
 }
 
 async function resolveProject(ctx, client, accountId) {
-  if (ctx.flags.name) return client.getProject(accountId, ctx.flags.name);
+  if (ctx.flags.name) return busy('Loading the project', () => client.getProject(accountId, ctx.flags.name));
   const repo = requireRepo(ctx);
-  const project = findProjectForRepo(await client.listProjects(accountId), repo.remote);
+  const projects = await busy('Loading your projects', () => client.listProjects(accountId));
+  const project = findProjectForRepo(projects, repo.remote);
   if (!project) throw new Fail(`No Pages project is connected to ${repoLabel(repo.remote)}. Run "flareship import" first.`);
   return project;
 }
@@ -251,6 +259,7 @@ function gitAccessHelp(remote, accountId) {
 async function tail(ctx, client, accountId, name, id) {
   const interval = Number(ctx.env.FLARESHIP_POLL_MS) || 3000;
   const started = Date.now();
+  const progress = spinner('Waiting for the build to start');
   let printed = 0;
   const flush = async () => {
     let lines;
@@ -260,24 +269,31 @@ async function tail(ctx, client, accountId, name, id) {
       if (error instanceof ApiError) return;
       throw error;
     }
+    if (lines.length > printed) progress.clear();
     for (const entry of lines.slice(printed)) ctx.log(dim('  | ') + entry.line);
     printed = Math.max(printed, lines.length);
   };
 
-  for (;;) {
-    await flush();
-    const state = deploymentState(await client.getDeployment(accountId, name, id));
-    if (state !== 'running') {
+  try {
+    for (;;) {
       await flush();
-      return state;
+      const deployment = await client.getDeployment(accountId, name, id);
+      const state = deploymentState(deployment);
+      if (state !== 'running') {
+        await flush();
+        return state;
+      }
+      progress.text(STAGES[deployment.latest_stage?.name] || 'Building');
+      if (Date.now() - started > TAIL_LIMIT_MS) return 'running';
+      await sleep(interval);
     }
-    if (Date.now() - started > TAIL_LIMIT_MS) return 'running';
-    await sleep(interval);
+  } finally {
+    progress.stop();
   }
 }
 
 async function deployAndFollow(ctx, client, accountId, project, branch) {
-  const deployment = await client.createDeployment(accountId, project.name, branch);
+  const deployment = await busy('Starting the build', () => client.createDeployment(accountId, project.name, branch));
   ctx.log(`Building ${bold(project.name)} from ${branch}...`);
   const state = await tail(ctx, client, accountId, project.name, deployment.id);
   if (state === 'success') {
@@ -301,7 +317,8 @@ async function importCommand(ctx) {
   const { client, accountId } = await session(ctx);
   ctx.log(`account ${dim(accountId)}`);
 
-  const existing = findProjectForRepo(await client.listProjects(accountId), repo.remote);
+  const projects = await busy('Checking whether this repository is already connected', () => client.listProjects(accountId));
+  const existing = findProjectForRepo(projects, repo.remote);
   if (existing) {
     ctx.log(`${bold(existing.name)} is already connected to ${repoLabel(repo.remote)}.`);
     ctx.log(`Pushes to ${existing.production_branch} publish to ${cyan(siteUrl(existing))}`);
@@ -319,7 +336,7 @@ async function importCommand(ctx) {
   ctx.log(step(4, 4, 'Create and publish'));
   let project;
   try {
-    project = await client.createProject(accountId, {
+    project = await busy('Creating the project on Cloudflare', () => client.createProject(accountId, {
       name: plan.name,
       production_branch: plan.branch,
       build_config: { build_command: plan.build, destination_dir: plan.out, root_dir: plan.root },
@@ -335,7 +352,7 @@ async function importCommand(ctx) {
           preview_deployment_setting: plan.previews ? 'all' : 'none',
         },
       },
-    });
+    }));
   } catch (error) {
     if (error instanceof ApiError && error.has(NO_GIT_ACCESS)) throw new Fail(gitAccessHelp(repo.remote, accountId));
     throw error;
@@ -388,7 +405,7 @@ async function statusCommand(ctx) {
   row('build', build.build_command || dim('none'));
   row('publish', build.destination_dir || 'the whole repository');
 
-  const deployments = await client.listDeployments(accountId, project.name, 8);
+  const deployments = await busy('Loading the latest deployments', () => client.listDeployments(accountId, project.name, 8));
   ctx.log('');
   if (!deployments.length) ctx.log(dim('  no deployments yet'));
   for (const deployment of deployments) ctx.log(describeDeployment(deployment));
@@ -398,7 +415,7 @@ async function statusCommand(ctx) {
 async function logsCommand(ctx) {
   const { client, accountId } = await session(ctx);
   const project = await resolveProject(ctx, client, accountId);
-  const deployments = await client.listDeployments(accountId, project.name, 20);
+  const deployments = await busy('Loading the latest deployments', () => client.listDeployments(accountId, project.name, 20));
   const wanted = ctx.args[0];
   const deployment = wanted ? deployments.find((d) => d.id === wanted || d.short_id === wanted || d.id.startsWith(wanted)) : deployments[0];
   if (!deployment) throw new Fail(wanted ? `No recent deployment matches "${wanted}".` : `${project.name} has no deployments yet.`);
@@ -407,13 +424,14 @@ async function logsCommand(ctx) {
     const state = await tail(ctx, client, accountId, project.name, deployment.id);
     return state === 'success' ? 0 : 1;
   }
-  for (const entry of await client.deploymentLogs(accountId, project.name, deployment.id)) ctx.log(entry.line);
+  const lines = await busy('Loading the build log', () => client.deploymentLogs(accountId, project.name, deployment.id));
+  for (const entry of lines) ctx.log(entry.line);
   return 0;
 }
 
 async function listCommand(ctx) {
   const { client, accountId } = await session(ctx);
-  const projects = await client.listProjects(accountId);
+  const projects = await busy('Loading your projects', () => client.listProjects(accountId));
   if (!projects.length) ctx.log('No Pages projects in this account yet.');
   for (const project of projects) {
     const config = project.source?.config;
@@ -448,18 +466,19 @@ async function openCommand(ctx) {
 }
 
 async function browserLogin(ctx) {
-  let token = wranglerToken(ctx.env);
+  let token = await busy('Checking the Cloudflare sign-in', () => wranglerToken(ctx.env));
   if (token) {
     ctx.log('Cloudflare is already signed in on this machine (wrangler).');
   } else {
     ctx.log('Opening your browser to sign in to Cloudflare. Click "Allow" there.');
-    if (!wranglerLogin(ctx.env)) throw new Fail('The browser sign-in did not finish. Run "flareship login" again, or use "flareship login --token".');
-    token = wranglerToken(ctx.env);
+    ctx.log(dim('The first time, this downloads Cloudflare\'s wrangler and can take a minute.'));
+    if (!(await wranglerLogin(ctx.env))) throw new Fail('The browser sign-in did not finish. Run "flareship login" again, or use "flareship login --token".');
+    token = await busy('Reading the new session', () => wranglerToken(ctx.env));
     if (!token) throw new Fail('Signed in, but the session could not be read back. Try "flareship login --token".');
   }
   const client = createClient({ token, base: ctx.env.FLARESHIP_API_BASE });
   const accountId = ctx.env.CLOUDFLARE_ACCOUNT_ID || (await pickAccount(ctx, client));
-  await client.listProjects(accountId);
+  await busy('Checking access to Pages', () => client.listProjects(accountId));
   saveConfig({ auth: 'browser', accountId }, ctx.env);
   ctx.log(`${green('signed in')} account ${dim(accountId)}`);
   return { client, accountId, source: 'browser' };
@@ -477,7 +496,7 @@ async function tokenLogin(ctx) {
   if (!token) throw new Fail('No token entered.');
 
   const client = createClient({ token, base: ctx.env.FLARESHIP_API_BASE });
-  await client.verifyToken();
+  await busy('Checking the token', () => client.verifyToken());
   ctx.log(`${green('ok')} the token is valid`);
 
   let accountId = ctx.env.CLOUDFLARE_ACCOUNT_ID;
@@ -535,7 +554,7 @@ async function logoutCommand(ctx) {
 
 async function whoamiCommand(ctx) {
   const { client, accountId, source } = await session(ctx);
-  const projects = await client.listProjects(accountId);
+  const projects = await busy('Loading your projects', () => client.listProjects(accountId));
   const how = { env: 'CLOUDFLARE_API_TOKEN', token: `API token saved in ${configPath(ctx.env)}`, browser: 'Cloudflare browser sign-in (wrangler)' }[source];
   ctx.log(`signed in  ${how}`);
   ctx.log(`account    ${accountId}`);

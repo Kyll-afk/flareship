@@ -129,6 +129,21 @@ the first build, follows its log and prints the live address.
 | `flareship list` | Every Pages project in the account and where it comes from. |
 | `flareship whoami` | How you are signed in and to which account. |
 
+## Progress while it works
+
+Whenever `flareship` is waiting on Cloudflare it shows a spinner with what it is doing and,
+after two seconds, how long it has been waiting:
+
+```
+⠹ Checking the Cloudflare sign-in  3s
+⠼ Cloning the repository  12s
+⠦ Building the site  41s
+```
+
+During a build the label follows the real stage (queue, machine setup, clone, build,
+publish) and the build log scrolls above it. The spinner is drawn only in a terminal; in
+scripts, pipes and CI the output is plain lines. `FLARESHIP_NO_SPINNER=1` turns it off.
+
 ## Build detection
 
 `import` looks at the repository and proposes a build command and a folder to publish.
