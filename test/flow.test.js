@@ -112,11 +112,11 @@ test('import creates a connected project, builds it and reports the live address
   const { code, output } = await flareship(dir, ['import', '--yes']);
 
   assert.equal(code, 0, output);
-  assert.match(output, /\[1\/4\] Repository/);
-  assert.match(output, /\[4\/4\] Create and publish/);
+  assert.match(output, /1\/4\s+Repository/);
+  assert.match(output, /4\/4\s+Create and publish/);
   assert.match(output, /Detected Vite/);
   assert.match(output, /Success: Your site was deployed!/);
-  assert.match(output, /live at https:\/\/demo-site\.pages\.dev/);
+  assert.match(output, /Live at https:\/\/demo-site\.pages\.dev/);
 
   const created = JSON.parse(state.requests.find((r) => r.method === 'POST' && r.path.endsWith('/pages/projects')).text);
   assert.deepEqual(created.build_config, { build_command: 'npm run build', destination_dir: 'dist', root_dir: '' });
@@ -149,7 +149,7 @@ test('status, logs and open work on the connected project', async () => {
   const dir = repo('demo_site', { 'index.html': '<html>' });
   const status = await flareship(dir, ['status']);
   assert.equal(status.code, 0, status.output);
-  assert.match(status.output, /demo-site\s+https:\/\/demo-site\.pages\.dev/);
+  assert.match(status.output, /demo-site\s+\S+ live\n\s+https:\/\/demo-site\.pages\.dev/);
   assert.match(status.output, /npm run build/);
   assert.match(status.output, /abcdef1/);
 
@@ -178,7 +178,7 @@ test('import refuses to guess when it cannot detect the build and nobody can be 
 
   const explicit = await flareship(dir, ['import', '--yes', '--build', 'none', '--out', 'web', '--name', 'Mystery Web', '--no-previews']);
   assert.equal(explicit.code, 1, 'the mock has no deployment route for this project, so the first build cannot start');
-  assert.match(explicit.output, /created.*mystery-web/);
+  assert.match(explicit.output, /Created mystery-web/);
   assert.match(explicit.output, /first build could not be started/);
   const created = state.projects.find((p) => p.name === 'mystery-web');
   assert.deepEqual(created.build_config, { build_command: '', destination_dir: 'web', root_dir: '' });

@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { ApiError } from './api.js';
 import { HELP, commands } from './commands.js';
 import { Fail } from './errors.js';
-import { red } from './ui.js';
+import { red, sym } from './ui.js';
 
 const BOOLEAN = new Set(['yes', 'follow', 'help', 'version', 'no-previews', 'token']);
 const VALUED = new Set(['name', 'build', 'out', 'root', 'branch']);
@@ -73,7 +73,10 @@ export async function run(argv, io = {}) {
     return code ?? 0;
   } catch (error) {
     if (error instanceof Fail || error instanceof ApiError) {
-      err(`${red('error')} ${error.message}`);
+      const [first, ...rest] = error.message.split('\n');
+      err(`\n  ${red(sym.fail)} ${first}`);
+      for (const line of rest) err(`    ${line}`);
+      err('');
       return 1;
     }
     throw error;

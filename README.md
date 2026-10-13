@@ -14,33 +14,51 @@ through the Cloudflare API.
 ```
 $ flareship import
 
-[1/4] Repository
-github.com/Kyll-afk/ziffy-site  on main
+  1/4  Repository
+       github.com/Kyll-afk/ziffy-site  ·  main
 
-[2/4] Cloudflare account
-account 2824bd06…
+  2/4  Cloudflare account
+       2824bd06346d60f4326fddc0142d811c
 
-[3/4] Build settings
-Detected Vite
-Project name (ziffy-site):
-Production branch (main):
-Build command, or "none" (npm run build):
-Folder to publish, or "." for the whole repository (dist):
+  3/4  Build settings
+       Detected Vite
 
-  project   ziffy-site
-  repo      github.com/Kyll-afk/ziffy-site
-  branch    main  (other branches get preview links)
-  build     npm run build
-  publish   dist
+       Project name (ziffy-site):
+       Production branch (main):
+       Build command, or "none" (npm run build):
+       Folder to publish, or "." for the whole repository (dist):
 
-Create this project? (Y/n)
+       Project      ziffy-site
+       Repository   github.com/Kyll-afk/ziffy-site
+       Branch       main  ·  other branches get preview links
+       Build        npm run build
+       Publish      dist
 
-[4/4] Create and publish
-created ziffy-site. Every push to main now publishes to https://ziffy-site.pages.dev
-Building ziffy-site from main...
-  | Cloning repository...
-  | Success: Your site was deployed!
-done live at https://ziffy-site.pages.dev
+       Create this project? (Y/n)
+
+  4/4  Create and publish
+       ✓ Created ziffy-site
+         Every push to main now publishes to https://ziffy-site.pages.dev
+       Building ziffy-site from main
+       │ Cloning repository...
+       │ Success: Your site was deployed!
+       ✓ Live at https://ziffy-site.pages.dev
+```
+
+```
+$ flareship status
+
+  ziffy-site  ✓ live
+  https://ziffy-site.pages.dev
+
+  Repository   github.com/Kyll-afk/ziffy-site
+  Branch       main
+  Build        python3 tools/dist.py
+  Publish      dist
+
+     ID        TARGET      BRANCH  COMMIT   MESSAGE                              WHEN
+  ✓  0c34d148  production  main    c05737b  Drop the GitHub Actions deploy; Cl…  1h ago
+  ✓  fd6fe141  production  main    65dda1f  Ziffy site: scroll-driven tour of …  1h ago
 ```
 
 ## Install
@@ -143,6 +161,10 @@ after two seconds, how long it has been waiting:
 During a build the label follows the real stage (queue, machine setup, clone, build,
 publish) and the build log scrolls above it. The spinner is drawn only in a terminal; in
 scripts, pipes and CI the output is plain lines. `FLARESHIP_NO_SPINNER=1` turns it off.
+
+Colours are used only in a terminal and are dropped when `NO_COLOR` is set. The symbols
+(`✓ ✗ ● │`) fall back to plain characters (`+ x * |`) in the classic Windows console;
+`FLARESHIP_ASCII=1` forces the plain ones anywhere.
 
 ## Build detection
 

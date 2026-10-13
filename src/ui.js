@@ -52,10 +52,38 @@ export function ago(date, now = Date.now()) {
   return `${Math.round(seconds / 86400)}d ago`;
 }
 
-const FRAMES =
-  process.platform === 'win32' && !process.env.WT_SESSION
-    ? ['|', '/', '-', '\\']
-    : ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+export const fancy =
+  !process.env.FLARESHIP_ASCII && (process.platform !== 'win32' || Boolean(process.env.WT_SESSION || process.env.TERM_PROGRAM));
+
+export const sym = fancy
+  ? { ok: '✓', fail: '✗', warn: '▲', run: '●', stop: '■', bar: '│', dot: '·', ellipsis: '…' }
+  : { ok: '+', fail: 'x', warn: '!', run: '*', stop: '#', bar: '|', dot: '-', ellipsis: '...' };
+
+const FRAMES = fancy ? ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] : ['|', '/', '-', '\\'];
+const ANSI = /\x1b\[[0-9;]*m/g;
+
+export const width = (text) => String(text).replace(ANSI, '').length;
+export const pad = (text, size) => String(text) + ' '.repeat(Math.max(0, size - width(text)));
+export const columns = () => process.stdout.columns || 100;
+
+export function truncate(text, size) {
+  const value = String(text);
+  if (value.length <= size) return value;
+  return value.slice(0, Math.max(0, size - sym.ellipsis.length)).trimEnd() + sym.ellipsis;
+}
+
+export function fields(pairs, indent = 2) {
+  const rows = pairs.filter(Boolean);
+  const size = Math.max(...rows.map(([label]) => label.length)) + 3;
+  return rows.map(([label, value]) => `${' '.repeat(indent)}${dim(label.padEnd(size))}${value}`);
+}
+
+export function table(rows, { header, indent = 2, gap = 2 } = {}) {
+  const all = header ? [header.map((cell) => dim(cell.toUpperCase())), ...rows] : rows;
+  const sizes = [];
+  for (const row of all) row.forEach((cell, i) => (sizes[i] = Math.max(sizes[i] || 0, width(cell))));
+  return all.map((row) => (' '.repeat(indent) + row.map((cell, i) => pad(cell, sizes[i] + gap)).join('')).trimEnd());
+}
 
 export function spinner(label) {
   const stream = process.stderr;
