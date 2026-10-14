@@ -25,14 +25,14 @@ export function readRepo(cwd) {
   if (!root) return null;
   const remoteUrl = git(['remote', 'get-url', 'origin'], cwd);
   const head = git(['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], cwd);
-  const branch = git(['rev-parse', '--abbrev-ref', 'HEAD'], cwd);
+  const branch = git(['symbolic-ref', '--short', 'HEAD'], cwd);
   const upstream = git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], cwd);
   const ahead = upstream ? Number(git(['rev-list', '--count', '@{u}..HEAD'], cwd) || 0) : 0;
   return {
     root,
     remoteUrl,
     remote: parseRemote(remoteUrl),
-    branch: branch && branch !== 'HEAD' ? branch : null,
+    branch: branch || null,
     defaultBranch: head ? head.replace(/^origin\//, '') : null,
     upstream,
     ahead,
