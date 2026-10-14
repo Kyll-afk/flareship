@@ -69,3 +69,53 @@ export function detect(dir) {
 
   return { name: null, build: null, out: null, confident: false, note: null };
 }
+
+function stripJsonComments(text) {
+  let out = '';
+  let inString = false;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    const next = text[i + 1];
+    if (inString) {
+      out += char;
+      if (char === '\\') out += text[++i] ?? '';
+      else if (char === '"') inString = false;
+    } else if (char === '"') {
+      inString = true;
+      out += char;
+    } else if (char === '/' && next === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      out += '\n';
+    } else if (char === '/' && next === '*') {
+      i += 2;
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) i++;
+      i++;
+    } else {
+      out += char;
+    }
+  }
+  return out.replace(/,(\s*[}\]])/g, '$1');
+}
+
+export function readWranglerConfig(dir) {
+  for (const file of ['wrangler.jsonc', 'wrangler.json', 'wrangler.toml']) {
+    const full = path.join(dir, file);
+    if (!fs.existsSync(full)) continue;
+    const text = fs.readFileSync(full, 'utf8');
+    if (file.endsWith('.toml')) {
+      const top = text.split(/^\s*\[/m)[0];
+      return {
+        file,
+        name: top.match(/^\s*name\s*=\s*["']([^"']+)["']/m)?.[1] || null,
+        pages: /^\s*pages_build_output_dir\s*=/m.test(top),
+      };
+    }
+    try {
+      const json = JSON.parse(stripJsonComments(text));
+      return { file, name: typeof json.name === 'string' ? json.name : null, pages: 'pages_build_output_dir' in json };
+    } catch {
+      return { file, name: null, pages: false };
+    }
+  }
+  return null;
+}

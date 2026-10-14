@@ -1,7 +1,7 @@
 {
   "name": "flareship",
-  "version": "0.1.0",
-  "description": "Import a Git repository into Cloudflare Pages from the terminal: push-to-deploy in one command.",
+  "version": "0.2.0",
+  "description": "Import a Git repository into Cloudflare Pages or Workers from the terminal: push-to-deploy in one command.",
   "type": "module",
   "bin": {
     "flareship": "bin/flareship.js"
@@ -20,6 +20,7 @@
   "keywords": [
     "cloudflare",
     "pages",
+    "workers",
     "deploy",
     "cli"
   ],

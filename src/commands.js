@@ -1,57 +1,70 @@
 import os from 'node:os';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
-import { ApiError, createClient } from './api.js';
+import { ApiError, createClient, isAuthError } from './api.js';
 import { clearConfig, clearSession, configPath, loadConfig, loadSession, saveConfig, saveSession } from './config.js';
-import { detect } from './detect.js';
+import { detect, readWranglerConfig } from './detect.js';
 import { Fail } from './errors.js';
 import { readRepo } from './git.js';
+import { githubRepo } from './github.js';
 import { wranglerLogin, wranglerToken } from './wrangler.js';
 import { ago, ask, askSecret, bold, busy, columns, confirm, cyan, dim, fields, green, red, spinner, sym, table, truncate, yellow } from './ui.js';
 
 const NO_GIT_ACCESS = 8000011;
 const TAIL_LIMIT_MS = 20 * 60 * 1000;
 const SESSION_TTL_MS = 50 * 60 * 1000;
-const STAGES = {
+const PAGES_STAGES = {
   queued: 'Waiting in the build queue',
   initialize: 'Preparing the build machine',
   clone_repo: 'Cloning the repository',
   build: 'Building the site',
   deploy: 'Publishing to Cloudflare',
 };
+const WORKER_STAGES = {
+  queued: 'Waiting in the build queue',
+  initializing: 'Preparing the build machine',
+  running: 'Building and deploying the Worker',
+};
 
-export const HELP = `flareship: connect a Git repository to Cloudflare Pages from the terminal
+export const HELP = `flareship: connect a Git repository to Cloudflare Pages or Workers from the terminal
 
 Usage
   flareship import            connect this repository and publish it, step by step
   flareship guide             print the full setup walkthrough with every link
-  flareship status            show the project and its latest deployments
-  flareship deploy            start a new deployment and follow the build
-  flareship logs [id]         print a deployment's build log (latest by default)
+  flareship status            show the project and its latest builds
+  flareship deploy            start a new build and follow it
+  flareship logs [id]         print a build log (latest by default)
   flareship open              open the live site in the browser
-  flareship list              list every Pages project in the account
+  flareship list              list every Pages project and Worker in the account
   flareship login             sign in to Cloudflare through the browser
-  flareship login --token     use an API token instead (scripts, CI)
+  flareship login --token     use an API token instead (Workers, scripts, CI)
   flareship logout            forget the saved account or token
   flareship whoami            show how you are signed in and to which account
 
 Options
-  --name <name>       project name (default: the repository name)
+  --name <name>       project name (default: the repository or Worker name)
   --build <command>   build command ("none" for no build step)
-  --out <folder>      folder to publish after the build
+  --out <folder>      folder to publish after the build (Pages)
   --root <folder>     folder to build from, for monorepos
   --branch <branch>   production branch (import) or branch to deploy (deploy)
-  --no-previews       do not build preview deployments for other branches
+  --no-previews       do not build previews for other branches
+  --workers           treat the project as a Worker
+  --pages             treat the project as a Pages project
   -y, --yes           accept the detected settings without asking
   -f, --follow        keep following a running build (logs)
   -h, --help          show this help
   -v, --version       show the version
 
+Pages or Workers
+  A repository with a wrangler.toml / wrangler.jsonc is imported as a Worker;
+  anything else as a Pages project. --workers and --pages override that.
+
 Authentication
   "flareship login" opens the browser (Cloudflare's own wrangler sign-in): no
-  token to create and no Account ID to copy. For scripts, CLOUDFLARE_API_TOKEN
-  and CLOUDFLARE_ACCOUNT_ID are read from the environment and win over it; the
-  token needs the "Cloudflare Pages: Edit" permission.`;
+  token to create and no Account ID to copy. That is enough for Pages.
+  Workers builds need an API token, because Cloudflare does not let the browser
+  sign-in use that API: run "flareship login --token". In scripts, set
+  CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID.`;
 
 export function sanitizeName(raw) {
   const name = String(raw ?? '')
@@ -81,6 +94,13 @@ export function deploymentState(deployment) {
   return 'running';
 }
 
+export function buildState(build) {
+  if (build.status !== 'stopped') return 'running';
+  if (build.build_outcome === 'success') return 'success';
+  if (build.build_outcome === 'cancelled' || build.build_outcome === 'skipped') return 'canceled';
+  return 'failure';
+}
+
 export function extractAccountId(value) {
   const match = String(value ?? '').match(/(?<![0-9a-f])[0-9a-f]{32}(?![0-9a-f])/i);
   return match ? match[0].toLowerCase() : null;
@@ -103,6 +123,24 @@ const LINKS = {
   connectGit: (accountId) => `https://dash.cloudflare.com/${accountId || '?to=/:account'}/workers-and-pages/create/pages`,
 };
 
+const TOKEN_PERMISSIONS = [
+  'Account | Cloudflare Pages             | Edit   (Pages projects)',
+  'Account | Workers Builds Configuration | Edit   (Workers)',
+  'Account | Workers Scripts              | Edit   (Workers)',
+  'Account | Account Settings             | Read   (finds your account by itself)',
+];
+
+const WORKERS_TOKEN_HELP = [
+  'Workers builds need an API token: Cloudflare does not let the browser sign-in use that API.',
+  '',
+  `Create one at ${LINKS.tokens}`,
+  '  Create Token -> Custom token -> Get started, with these permissions:',
+  ...TOKEN_PERMISSIONS.map((line) => `    ${line}`),
+  '  Account Resources: Include | your account',
+  '',
+  'Then run "flareship login --token" and paste it. Pages keeps working with the same token.',
+].join('\n');
+
 export const GUIDE = `flareship setup, step by step
 
 1. Put the project on GitHub (or GitLab)
@@ -111,11 +149,17 @@ export const GUIDE = `flareship setup, step by step
      git push -u origin main
 
 2. Sign in to Cloudflare (once per machine)
-   Run:  flareship login
-   Your browser opens on Cloudflare: click "Allow". There is no token to create
-   and no Account ID to copy. It uses Cloudflare's own wrangler sign-in, so if
-   wrangler is already signed in on this machine you can skip this step.
-   Scripts and CI use an API token instead:  flareship login --token
+   Pages:    flareship login
+             Your browser opens on Cloudflare: click "Allow". No token to create
+             and no Account ID to copy. If wrangler is already signed in on this
+             machine you can skip this step.
+   Workers:  flareship login --token
+             Cloudflare does not let the browser sign-in manage Workers builds,
+             so a Worker needs an API token. Create it at
+             ${LINKS.tokens}
+             (Create Token -> Custom token) with these permissions:
+${TOKEN_PERMISSIONS.map((line) => `               ${line}`).join('\n')}
+             The same token also works for Pages, and for scripts and CI.
 
 3. Let Cloudflare read the repository (once per repository, or once for all)
    First time ever: open ${LINKS.connectGit()}
@@ -127,8 +171,10 @@ export const GUIDE = `flareship setup, step by step
 
 4. Import the project
    Inside the repository run:  flareship import
-   It detects the build, asks you to confirm, creates the Pages project,
-   starts the first build and prints the live address.
+   A repository with a wrangler.toml / wrangler.jsonc becomes a Worker, anything
+   else a Pages project (--workers and --pages override). It detects the build,
+   asks you to confirm, connects the repository, starts the first build and
+   prints the live address.
 
 5. From now on
      git push                 publishes (production branch) or creates a preview (other branches)
@@ -144,6 +190,19 @@ const warn = (text, indent = '  ') => `${indent}${yellow(sym.warn)} ${text}`;
 const siteUrl = (project) => `https://${project.subdomain || `${project.name}.pages.dev`}`;
 const repoLabel = (remote) => `${remote.type}.com/${remote.owner}/${remote.repo}`;
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const STATE_MARK = {
+  success: () => green(sym.ok),
+  failure: () => red(sym.fail),
+  canceled: () => yellow(sym.stop),
+  running: () => cyan(sym.run),
+};
+const STATE_WORD = {
+  success: () => green(`${sym.ok} live`),
+  failure: () => red(`${sym.fail} last build failed`),
+  canceled: () => yellow(`${sym.stop} last build canceled`),
+  running: () => cyan(`${sym.run} building`),
+};
 
 async function browserToken(ctx, { fresh = false } = {}) {
   if (!fresh) {
@@ -194,25 +253,232 @@ async function pickAccount(ctx, client) {
   return account.id;
 }
 
+function requireBuildsAccess(source) {
+  if (source === 'browser') throw new Fail(WORKERS_TOKEN_HELP);
+}
+
 function requireRepo(ctx) {
   const repo = readRepo(ctx.cwd);
   if (!repo) throw new Fail('This folder is not inside a Git repository.');
   if (!repo.remoteUrl) throw new Fail('This repository has no "origin" remote. Push it to GitHub or GitLab first.');
-  if (!repo.remote) throw new Fail(`Cloudflare Pages can only connect to GitHub or GitLab, and origin is ${repo.remoteUrl}`);
+  if (!repo.remote) throw new Fail(`Cloudflare can only connect to GitHub or GitLab, and origin is ${repo.remoteUrl}`);
   return repo;
 }
 
-async function resolveProject(ctx, client, accountId) {
-  if (ctx.flags.name) return busy('Loading the project', () => client.getProject(accountId, ctx.flags.name));
-  const repo = requireRepo(ctx);
-  const projects = await busy('Loading your projects', () => client.listProjects(accountId));
-  const project = findProjectForRepo(projects, repo.remote);
-  if (!project) throw new Fail(`No Pages project is connected to ${repoLabel(repo.remote)}. Run "flareship import" first.`);
-  return project;
+function pagesTarget({ client, accountId }, project) {
+  return {
+    kind: 'pages',
+    name: project.name,
+    project,
+    url: siteUrl(project),
+    productionBranch: project.production_branch,
+    connected: Boolean(project.source),
+    async start(branch) {
+      const deployment = await client.createDeployment(accountId, project.name, branch);
+      return { id: deployment.id, url: deployment.url };
+    },
+    logs: (id) => client.deploymentLogs(accountId, project.name, id),
+    async poll(id) {
+      const deployment = await client.getDeployment(accountId, project.name, id);
+      return { state: deploymentState(deployment), label: PAGES_STAGES[deployment.latest_stage?.name] };
+    },
+  };
 }
 
-async function planImport(ctx, repo) {
+async function workerTarget(s, script, { builds = true } = {}) {
+  const { client, accountId, source } = s;
+  if (builds) requireBuildsAccess(source);
+  const [config, subdomain] = await busy('Loading the Worker', () =>
+    Promise.all([
+      builds ? client.getWorkerBuildConfig(accountId, script.tag) : null,
+      client.workersSubdomain(accountId).catch(() => null),
+    ]),
+  );
+  return {
+    kind: 'worker',
+    name: script.id,
+    tag: script.tag,
+    config,
+    url: subdomain ? `https://${script.id}.${subdomain}.workers.dev` : null,
+    productionBranch: config?.git_repository?.branch || null,
+    connected: Boolean(config),
+    async start(branch) {
+      const triggers = await client.listTriggers(accountId, script.tag);
+      const live = triggers.filter((t) => !t.deleted_on);
+      const trigger =
+        live.find((t) => (t.branch_includes || []).includes(branch)) ||
+        live.find((t) => (t.branch_includes || []).includes('*') && !(t.branch_excludes || []).includes(branch));
+      if (!trigger) throw new Fail(`${script.id} has no build trigger for the branch "${branch}".`);
+      const build = await client.startBuild(accountId, trigger.trigger_uuid, branch);
+      return { id: build.build_uuid, url: build.preview_url || null };
+    },
+    logs: (id) => client.buildLogs(accountId, id),
+    async poll(id) {
+      const build = await client.getBuild(accountId, id);
+      return { state: buildState(build), label: WORKER_STAGES[build.status] };
+    },
+  };
+}
+
+function wranglerConfigFor(ctx, repo) {
+  return readWranglerConfig(path.join(repo.root, cleanFolder(ctx.flags.root)));
+}
+
+async function resolveTarget(ctx, s, options) {
+  const { client, accountId } = s;
   const { flags } = ctx;
+
+  if (flags.name) {
+    let pagesError = null;
+    if (!flags.workers) {
+      try {
+        return pagesTarget(s, await busy('Loading the project', () => client.getProject(accountId, flags.name)));
+      } catch (error) {
+        if (!(error instanceof ApiError) || isAuthError(error) || flags.pages) throw error;
+        pagesError = error;
+      }
+    }
+    const scripts = await busy('Loading your Workers', () => client.listScripts(accountId));
+    const script = scripts.find((x) => x.id === flags.name);
+    if (script) return workerTarget(s, script, options);
+    throw pagesError || new Fail(`No Worker is called "${flags.name}".`);
+  }
+
+  const repo = requireRepo(ctx);
+  if (!flags.workers) {
+    const projects = await busy('Loading your projects', () => client.listProjects(accountId));
+    const project = findProjectForRepo(projects, repo.remote);
+    if (project) return pagesTarget(s, project);
+  }
+  if (!flags.pages) {
+    const config = wranglerConfigFor(ctx, repo);
+    if (config?.name && !config.pages) {
+      const scripts = await busy('Loading your Workers', () => client.listScripts(accountId));
+      const script = scripts.find((x) => x.id === config.name);
+      if (script) return workerTarget(s, script, options);
+    }
+  }
+  throw new Fail(`Nothing on Cloudflare is connected to ${repoLabel(repo.remote)} yet. Run "flareship import" first.`);
+}
+
+function gitAccessHelp(remote, accountId) {
+  if (remote.type !== 'github') {
+    return [
+      `Cloudflare has no access to ${repoLabel(remote)}.`,
+      `Connect GitLab once at ${LINKS.connectGit(accountId)} and run this again.`,
+    ].join('\n');
+  }
+  return [
+    `Cloudflare has no access to ${repoLabel(remote)}.`,
+    '',
+    'If Cloudflare is already connected to your GitHub account, add this repository:',
+    `  ${LINKS.githubApp}  ->  Cloudflare Workers and Pages  ->  Configure`,
+    'If it was never connected, do it once here ("Import an existing Git repository" -> "Connect GitHub"):',
+    `  ${LINKS.connectGit(accountId)}`,
+    '',
+    'Then run "flareship import" again.',
+  ].join('\n');
+}
+
+async function tail(ctx, target, id, indent = '  ') {
+  const interval = Number(ctx.env.FLARESHIP_POLL_MS) || 3000;
+  const started = Date.now();
+  const progress = spinner('Waiting for the build to start');
+  let printed = 0;
+  const flush = async () => {
+    let lines;
+    try {
+      lines = await target.logs(id);
+    } catch (error) {
+      if (error instanceof ApiError) return;
+      throw error;
+    }
+    if (lines.length > printed) progress.clear();
+    for (const entry of lines.slice(printed)) ctx.log(`${indent}${dim(sym.bar)} ${dim(entry.line)}`);
+    printed = Math.max(printed, lines.length);
+  };
+
+  try {
+    for (;;) {
+      await flush();
+      const { state, label } = await target.poll(id);
+      if (state !== 'running') {
+        await flush();
+        return state;
+      }
+      progress.text(label || 'Building');
+      if (Date.now() - started > TAIL_LIMIT_MS) return 'running';
+      await sleep(interval);
+    }
+  } finally {
+    progress.stop();
+  }
+}
+
+async function deployAndFollow(ctx, target, branch, indent = '  ') {
+  const build = await busy('Starting the build', () => target.start(branch));
+  ctx.log(`${indent}Building ${bold(target.name)} from ${branch}`);
+  const state = await tail(ctx, target, build.id, indent);
+  if (state === 'success') {
+    const production = branch === target.productionBranch;
+    const url = production ? target.url : build.url;
+    ctx.log(ok(url ? `${production ? 'Live at' : 'Preview at'} ${cyan(url)}` : 'Deployed', indent));
+    ctx.log('');
+    return 0;
+  }
+  if (state === 'running') {
+    ctx.log(warn('Still building after 20 minutes. Check it with "flareship status".', indent));
+    ctx.log('');
+    return 1;
+  }
+  throw new Fail(`The build ${state === 'canceled' ? 'was canceled' : 'failed'}. See the log above.`);
+}
+
+function alreadyConnected(ctx, target, repo) {
+  ctx.log('');
+  ctx.log(ok(`${bold(target.name)} is already connected to ${repoLabel(repo.remote)}`));
+  if (target.url) ctx.log(`    Pushes to ${target.productionBranch} publish to ${cyan(target.url)}`);
+  ctx.log('');
+  return 0;
+}
+
+function pushWarnings(repo) {
+  if (!repo.upstream) return ['This branch has not been pushed. Cloudflare builds what is on the remote.'];
+  if (repo.ahead > 0) return [`${repo.ahead} local commit(s) are not pushed yet and will not be in the first build.`];
+  return [];
+}
+
+function printPlan(ctx, rows, warnings) {
+  ctx.log('');
+  for (const line of fields(rows, IN.length)) ctx.log(line);
+  if (warnings.length) ctx.log('');
+  for (const warning of warnings) ctx.log(warn(warning, IN));
+}
+
+async function confirmPlan(ctx, question) {
+  if (!ctx.prompts) return true;
+  ctx.log('');
+  if (await confirm(`${IN}${question}`)) return true;
+  ctx.log(`${IN}Nothing was created.`);
+  return false;
+}
+
+async function firstBuild(ctx, target, branch) {
+  try {
+    return await deployAndFollow(ctx, target, branch, IN);
+  } catch (error) {
+    if (error instanceof ApiError) {
+      throw new Fail(`The project exists, but the first build could not be started: ${error.message}\nPush a commit or run "flareship deploy".`);
+    }
+    throw error;
+  }
+}
+
+async function importPages(ctx, s, repo) {
+  const { client, accountId } = s;
+  const { flags } = ctx;
+
+  ctx.log(step(3, 4, 'Build settings'));
   const root = cleanFolder(flags.root);
   const found = detect(path.join(repo.root, root));
   const plan = {
@@ -236,131 +502,20 @@ async function planImport(ctx, repo) {
   } else if (plan.build === null || plan.out === null) {
     throw new Fail('Could not detect the build settings. Pass --build "<command>" (or --build none) and --out <folder>.');
   }
-  return plan;
-}
 
-function printPlan(ctx, repo, plan) {
-  const rows = [
-    ['Project', bold(plan.name)],
-    ['Repository', repoLabel(repo.remote)],
-    ['Branch', `${plan.branch}${plan.previews ? dim(`  ${sym.dot}  other branches get preview links`) : ''}`],
-    plan.root ? ['Root', plan.root] : null,
-    ['Build', plan.build || dim('none')],
-    ['Publish', plan.out || 'the whole repository'],
-  ];
-  ctx.log('');
-  for (const line of fields(rows, IN.length)) ctx.log(line);
-
-  const warnings = [];
-  if (!plan.out) warnings.push('No publish folder: every file in the repository will be public.');
-  if (!repo.upstream) warnings.push('This branch has not been pushed. Cloudflare builds what is on the remote.');
-  else if (repo.ahead > 0) warnings.push(`${repo.ahead} local commit(s) are not pushed yet and will not be in the first build.`);
-  if (warnings.length) ctx.log('');
-  for (const warning of warnings) ctx.log(warn(warning, IN));
-}
-
-function gitAccessHelp(remote, accountId) {
-  if (remote.type !== 'github') {
-    return [
-      `Cloudflare has no access to ${repoLabel(remote)}.`,
-      `Connect GitLab once at https://dash.cloudflare.com/${accountId}/workers-and-pages/create/pages and run this again.`,
-    ].join('\n');
-  }
-  return [
-    `Cloudflare has no access to ${repoLabel(remote)}.`,
-    '',
-    'If Cloudflare is already connected to your GitHub account, add this repository:',
-    `  ${LINKS.githubApp}  ->  Cloudflare Workers and Pages  ->  Configure`,
-    'If it was never connected, do it once here ("Import an existing Git repository" -> "Connect GitHub"):',
-    `  ${LINKS.connectGit(accountId)}`,
-    '',
-    'Then run "flareship import" again.',
-  ].join('\n');
-}
-
-async function tail(ctx, client, accountId, name, id, indent = '  ') {
-  const interval = Number(ctx.env.FLARESHIP_POLL_MS) || 3000;
-  const started = Date.now();
-  const progress = spinner('Waiting for the build to start');
-  let printed = 0;
-  const flush = async () => {
-    let lines;
-    try {
-      lines = await client.deploymentLogs(accountId, name, id);
-    } catch (error) {
-      if (error instanceof ApiError) return;
-      throw error;
-    }
-    if (lines.length > printed) progress.clear();
-    for (const entry of lines.slice(printed)) ctx.log(`${indent}${dim(sym.bar)} ${dim(entry.line)}`);
-    printed = Math.max(printed, lines.length);
-  };
-
-  try {
-    for (;;) {
-      await flush();
-      const deployment = await client.getDeployment(accountId, name, id);
-      const state = deploymentState(deployment);
-      if (state !== 'running') {
-        await flush();
-        return state;
-      }
-      progress.text(STAGES[deployment.latest_stage?.name] || 'Building');
-      if (Date.now() - started > TAIL_LIMIT_MS) return 'running';
-      await sleep(interval);
-    }
-  } finally {
-    progress.stop();
-  }
-}
-
-async function deployAndFollow(ctx, client, accountId, project, branch, indent = '  ') {
-  const deployment = await busy('Starting the build', () => client.createDeployment(accountId, project.name, branch));
-  ctx.log(`${indent}Building ${bold(project.name)} from ${branch}`);
-  const state = await tail(ctx, client, accountId, project.name, deployment.id, indent);
-  if (state === 'success') {
-    const production = branch === project.production_branch;
-    ctx.log(ok(`${production ? 'Live at' : 'Preview at'} ${cyan(production ? siteUrl(project) : deployment.url)}`, indent));
-    ctx.log('');
-    return 0;
-  }
-  if (state === 'running') {
-    ctx.log(warn('Still building after 20 minutes. Check it with "flareship status".', indent));
-    ctx.log('');
-    return 1;
-  }
-  throw new Fail(`The build ${state === 'canceled' ? 'was canceled' : 'failed'}. See the log above.`);
-}
-
-async function importCommand(ctx) {
-  ctx.log(step(1, 4, 'Repository'));
-  const repo = requireRepo(ctx);
-  ctx.log(`${IN}${repoLabel(repo.remote)}${repo.branch ? dim(`  ${sym.dot}  ${repo.branch}`) : ''}`);
-
-  ctx.log(step(2, 4, 'Cloudflare account'));
-  const { client, accountId } = await session(ctx);
-  ctx.log(`${IN}${accountId}`);
-
-  const projects = await busy('Checking whether this repository is already connected', () => client.listProjects(accountId));
-  const existing = findProjectForRepo(projects, repo.remote);
-  if (existing) {
-    ctx.log('');
-    ctx.log(ok(`${bold(existing.name)} is already connected to ${repoLabel(repo.remote)}`));
-    ctx.log(`    Pushes to ${existing.production_branch} publish to ${cyan(siteUrl(existing))}`);
-    ctx.log('');
-    return 0;
-  }
-
-  ctx.log(step(3, 4, 'Build settings'));
-  const plan = await planImport(ctx, repo);
-  printPlan(ctx, repo, plan);
-  if (ctx.prompts) {
-    ctx.log('');
-    if (!(await confirm(`${IN}Create this project?`))) {
-      ctx.log(`${IN}Nothing was created.`);
-      return 0;
-    }
-  }
+  printPlan(
+    ctx,
+    [
+      ['Pages project', bold(plan.name)],
+      ['Repository', repoLabel(repo.remote)],
+      ['Branch', `${plan.branch}${plan.previews ? dim(`  ${sym.dot}  other branches get preview links`) : ''}`],
+      plan.root ? ['Root', plan.root] : null,
+      ['Build', plan.build || dim('none')],
+      ['Publish', plan.out || 'the whole repository'],
+    ],
+    [...(plan.out ? [] : ['No publish folder: every file in the repository will be public.']), ...pushWarnings(repo)],
+  );
+  if (!(await confirmPlan(ctx, 'Create this project?'))) return 0;
 
   ctx.log(step(4, 4, 'Create and publish'));
   let project;
@@ -390,59 +545,184 @@ async function importCommand(ctx) {
   }
   ctx.log(ok(`Created ${bold(project.name)}`, IN));
   ctx.log(`${IN}  ${dim(`Every push to ${plan.branch} now publishes to ${siteUrl(project)}`)}`);
+  return firstBuild(ctx, pagesTarget(s, project), plan.branch);
+}
 
-  try {
-    return await deployAndFollow(ctx, client, accountId, project, plan.branch, IN);
-  } catch (error) {
-    if (error instanceof ApiError) {
-      throw new Fail(`The project exists, but the first build could not be started: ${error.message}\nPush a commit or run "flareship deploy".`);
-    }
-    throw error;
+async function importWorker(ctx, s, repo, config) {
+  const { client, accountId, source } = s;
+  const { flags } = ctx;
+  requireBuildsAccess(source);
+  if (repo.remote.type !== 'github') throw new Fail('flareship can only connect Workers to GitHub repositories for now. Use --pages, or connect it in the dashboard.');
+
+  ctx.log(step(3, 4, 'Build settings'));
+  if (!config) {
+    throw new Fail(
+      [
+        'A Worker needs a wrangler configuration file in the repository, and none was found.',
+        'For a static site, commit a wrangler.jsonc like this one and push it:',
+        '  { "name": "my-site", "compatibility_date": "2025-01-01", "assets": { "directory": "./dist" } }',
+        'Or import it as a Pages project with: flareship import --pages',
+      ].join('\n'),
+    );
   }
+  if (!config.name) throw new Fail(`${config.file} has no "name". Cloudflare needs it to match the Worker's name.`);
+  if (flags.name && flags.name !== config.name) {
+    throw new Fail(`The Worker must be named "${config.name}", the name in ${config.file}, or its builds will fail. Change it there.`);
+  }
+
+  const scripts = await busy('Loading your Workers', () => client.listScripts(accountId));
+  let script = scripts.find((x) => x.id === config.name);
+  if (script) {
+    const target = await workerTarget(s, script);
+    if (target.connected) return alreadyConnected(ctx, target, repo);
+  }
+
+  const root = cleanFolder(flags.root);
+  const found = detect(path.join(repo.root, root));
+  const plan = {
+    name: config.name,
+    branch: flags.branch ?? repo.defaultBranch ?? repo.branch ?? 'main',
+    build: flags.build !== undefined ? cleanBuild(flags.build) : found.build || '',
+    root,
+    previews: !flags['no-previews'],
+  };
+  ctx.log(`${IN}Worker ${bold(plan.name)}${dim(`  ${sym.dot}  from ${config.file}`)}`);
+  if (flags.out !== undefined) ctx.log(warn('--out is ignored for Workers: the published folder comes from the wrangler configuration.', IN));
+
+  if (ctx.prompts) {
+    ctx.log('');
+    plan.branch = await ask(`${IN}Production branch`, plan.branch);
+    plan.build = cleanBuild(await ask(`${IN}Build command, or "none"`, plan.build || 'none'));
+  }
+
+  const tokens = await busy('Looking for a build token', () => client.listBuildTokens(accountId));
+  if (!tokens.length) {
+    throw new Fail(
+      [
+        'This account has no Workers build token yet, and only the dashboard can create the first one.',
+        `Open ${LINKS.accountHome}, connect any Worker to a repository once (Settings -> Builds -> Connect),`,
+        'then run "flareship import" again.',
+      ].join('\n'),
+    );
+  }
+  const buildToken = tokens[0];
+
+  printPlan(
+    ctx,
+    [
+      ['Worker', `${bold(plan.name)}${script ? '' : dim(`  ${sym.dot}  will be created`)}`],
+      ['Repository', repoLabel(repo.remote)],
+      ['Branch', `${plan.branch}${plan.previews ? dim(`  ${sym.dot}  other branches get previews`) : ''}`],
+      plan.root ? ['Root', plan.root] : null,
+      ['Build', plan.build || dim('none')],
+      ['Deploy', 'npx wrangler deploy'],
+      ['Build token', buildToken.build_token_name || buildToken.build_token_uuid],
+    ],
+    pushWarnings(repo),
+  );
+  if (!(await confirmPlan(ctx, 'Connect this Worker?'))) return 0;
+
+  ctx.log(step(4, 4, 'Create and publish'));
+  const github = await busy('Reading the repository from GitHub', () => githubRepo(repo.remote, { env: ctx.env, cwd: ctx.cwd }));
+  if (!script) {
+    await busy('Creating the Worker', () => client.createPlaceholderWorker(accountId, plan.name));
+    script = (await busy('Creating the Worker', () => client.listScripts(accountId))).find((x) => x.id === plan.name);
+    if (!script) throw new Fail(`The Worker "${plan.name}" was created but could not be read back. Run "flareship import" again.`);
+    ctx.log(ok(`Created the Worker ${bold(plan.name)}`, IN));
+  }
+
+  const settings = (deployCommand) => ({
+    build_command: plan.build,
+    deploy_command: deployCommand,
+    root_directory: plan.root ? `/${plan.root}` : '/',
+    build_caching_enabled: true,
+    path_includes: ['*'],
+    path_excludes: [],
+    build_token_uuid: buildToken.build_token_uuid,
+  });
+  await busy('Connecting the repository', () =>
+    client.createWorkerBuildConfig(accountId, {
+      script_tag: script.tag,
+      git_repository: {
+        provider_type: 'github',
+        provider_account_id: github.ownerId,
+        provider_account_name: github.ownerName,
+        repo_id: github.repoId,
+        repo_name: github.repoName,
+        branch: plan.branch,
+      },
+      production_settings: settings('npx wrangler deploy'),
+      previews_enabled: plan.previews,
+      previews_base_config: settings('npx wrangler preview'),
+    }),
+  );
+  const target = await workerTarget(s, script);
+  ctx.log(ok(`Connected ${bold(plan.name)} to ${repoLabel(repo.remote)}`, IN));
+  if (target.url) ctx.log(`${IN}  ${dim(`Every push to ${plan.branch} now publishes to ${target.url}`)}`);
+  return firstBuild(ctx, target, plan.branch);
+}
+
+async function importCommand(ctx) {
+  const { flags } = ctx;
+  if (flags.workers && flags.pages) throw new Fail('Use --workers or --pages, not both.');
+
+  ctx.log(step(1, 4, 'Repository'));
+  const repo = requireRepo(ctx);
+  ctx.log(`${IN}${repoLabel(repo.remote)}${repo.branch ? dim(`  ${sym.dot}  ${repo.branch}`) : ''}`);
+
+  ctx.log(step(2, 4, 'Cloudflare account'));
+  const s = await session(ctx);
+  ctx.log(`${IN}${s.accountId}`);
+
+  if (!flags.workers) {
+    const projects = await busy('Checking whether this repository is already connected', () => s.client.listProjects(s.accountId));
+    const existing = findProjectForRepo(projects, repo.remote);
+    if (existing) return alreadyConnected(ctx, pagesTarget(s, existing), repo);
+  }
+
+  const config = wranglerConfigFor(ctx, repo);
+  const asWorker = flags.workers || (!flags.pages && Boolean(config) && !config.pages);
+  return asWorker ? importWorker(ctx, s, repo, config) : importPages(ctx, s, repo);
 }
 
 async function deployCommand(ctx) {
-  const { client, accountId } = await session(ctx);
-  const project = await resolveProject(ctx, client, accountId);
-  if (!project.source) throw new Fail(`${project.name} is not connected to a Git repository, so there is nothing to build.`);
+  const s = await session(ctx);
+  const target = await resolveTarget(ctx, s);
+  if (!target.connected) throw new Fail(`${target.name} is not connected to a Git repository, so there is nothing to build.`);
   ctx.log('');
-  return deployAndFollow(ctx, client, accountId, project, ctx.flags.branch || project.production_branch);
+  return deployAndFollow(ctx, target, ctx.flags.branch || target.productionBranch);
 }
 
-const STATE_MARK = {
-  success: () => green(sym.ok),
-  failure: () => red(sym.fail),
-  canceled: () => yellow(sym.stop),
-  running: () => cyan(sym.run),
-};
-const STATE_WORD = {
-  success: () => green(`${sym.ok} live`),
-  failure: () => red(`${sym.fail} last build failed`),
-  canceled: () => yellow(`${sym.stop} last build canceled`),
-  running: () => cyan(`${sym.run} building`),
-};
-
-function deploymentRows(deployments) {
-  const fixed = 58;
-  const room = Math.max(16, Math.min(60, columns() - fixed));
-  return deployments.map((deployment) => {
-    const meta = deployment.deployment_trigger?.metadata || {};
-    const message = String(meta.commit_message || '').split('\n')[0];
-    return [
-      STATE_MARK[deploymentState(deployment)](),
-      dim(deployment.short_id || ''),
-      deployment.environment || '',
-      truncate(meta.branch || '', 16),
-      (meta.commit_hash || '').slice(0, 7),
-      truncate(message, room),
-      dim(ago(deployment.created_on)),
-    ];
-  });
+function buildRows(items) {
+  const room = Math.max(16, Math.min(60, columns() - 58));
+  return items.map((item) => [
+    STATE_MARK[item.state](),
+    dim(item.id),
+    item.target,
+    truncate(item.branch || '', 16),
+    (item.commit || '').slice(0, 7),
+    truncate(String(item.message || '').split('\n')[0], room),
+    dim(ago(item.when)),
+  ]);
 }
 
-async function statusCommand(ctx) {
-  const { client, accountId } = await session(ctx);
-  const project = await resolveProject(ctx, client, accountId);
+function printBuilds(ctx, items, previews = []) {
+  ctx.log('');
+  if (!items.length) {
+    ctx.log(dim('  No builds yet.'));
+  } else {
+    const header = ['', 'id', 'target', 'branch', 'commit', 'message', 'when'];
+    for (const line of table(buildRows(items), { header })) ctx.log(line);
+    if (previews.length) ctx.log('');
+    for (const preview of previews) ctx.log(`  ${dim(`${preview.id}  ${preview.url}`)}`);
+    ctx.log('');
+    ctx.log(dim(`  flareship logs <id> prints a build log ${sym.dot} flareship deploy rebuilds`));
+  }
+  ctx.log('');
+}
+
+async function pagesStatus(ctx, { client, accountId }, target) {
+  const { project } = target;
   const deployments = await busy('Loading the latest deployments', () => client.listDeployments(accountId, project.name, 8));
   const build = project.build_config || {};
   const config = project.source?.config;
@@ -450,8 +730,8 @@ async function statusCommand(ctx) {
   const latest = deployments.find((d) => d.environment === 'production') || deployments[0];
 
   ctx.log('');
-  ctx.log(`  ${bold(project.name)}${latest ? `  ${STATE_WORD[deploymentState(latest)]()}` : ''}`);
-  ctx.log(`  ${cyan(siteUrl(project))}`);
+  ctx.log(`  ${bold(project.name)}  ${dim('Pages')}${latest ? `  ${STATE_WORD[deploymentState(latest)]()}` : ''}`);
+  ctx.log(`  ${cyan(target.url)}`);
   ctx.log('');
   const rows = [
     custom.length ? ['Domains', custom.join(', ')] : null,
@@ -462,54 +742,132 @@ async function statusCommand(ctx) {
   ];
   for (const line of fields(rows)) ctx.log(line);
 
-  ctx.log('');
-  if (!deployments.length) {
-    ctx.log(dim('  No deployments yet.'));
-  } else {
-    const header = ['', 'id', 'target', 'branch', 'commit', 'message', 'when'];
-    for (const line of table(deploymentRows(deployments), { header })) ctx.log(line);
-    const previews = deployments.filter((d) => d.environment !== 'production' && d.url).slice(0, 3);
-    if (previews.length) ctx.log('');
-    for (const preview of previews) ctx.log(`  ${dim(`${preview.short_id}  ${preview.url}`)}`);
-    ctx.log('');
-    ctx.log(dim(`  flareship logs <id> prints a build log ${sym.dot} flareship deploy rebuilds`));
-  }
-  ctx.log('');
+  const items = deployments.map((d) => {
+    const meta = d.deployment_trigger?.metadata || {};
+    return {
+      state: deploymentState(d),
+      id: d.short_id || '',
+      target: d.environment || '',
+      branch: meta.branch,
+      commit: meta.commit_hash,
+      message: meta.commit_message,
+      when: d.created_on,
+    };
+  });
+  const previews = deployments.filter((d) => d.environment !== 'production' && d.url).slice(0, 3).map((d) => ({ id: d.short_id, url: d.url }));
+  printBuilds(ctx, items, previews);
   return 0;
 }
 
-async function logsCommand(ctx) {
-  const { client, accountId } = await session(ctx);
-  const project = await resolveProject(ctx, client, accountId);
-  const deployments = await busy('Loading the latest deployments', () => client.listDeployments(accountId, project.name, 20));
-  const wanted = ctx.args[0];
-  const deployment = wanted ? deployments.find((d) => d.id === wanted || d.short_id === wanted || d.id.startsWith(wanted)) : deployments[0];
-  if (!deployment) throw new Fail(wanted ? `No recent deployment matches "${wanted}".` : `${project.name} has no deployments yet.`);
+function workerBuildItems(builds, productionBranch) {
+  return builds.map((b) => {
+    const meta = b.build_trigger_metadata || {};
+    return {
+      state: buildState(b),
+      id: (b.build_uuid || '').slice(0, 8),
+      target: !productionBranch || meta.branch === productionBranch ? 'production' : 'preview',
+      branch: meta.branch,
+      commit: meta.commit_hash,
+      message: meta.commit_message || (meta.build_trigger_source === 'push' ? '' : `started by ${meta.build_trigger_source || 'hand'}`),
+      when: b.created_on,
+    };
+  });
+}
 
-  if (ctx.flags.follow && deploymentState(deployment) === 'running') {
-    const state = await tail(ctx, client, accountId, project.name, deployment.id);
+async function workerStatus(ctx, { client, accountId }, target) {
+  const builds = target.connected ? await busy('Loading the latest builds', () => client.listWorkerBuilds(accountId, target.tag, 8)) : [];
+  const repo = target.config?.git_repository;
+  const settings = target.config?.production_settings || {};
+  const latest = builds.find((b) => (b.build_trigger_metadata?.branch || '') === target.productionBranch) || builds[0];
+
+  ctx.log('');
+  ctx.log(`  ${bold(target.name)}  ${dim('Worker')}${latest ? `  ${STATE_WORD[buildState(latest)]()}` : ''}`);
+  if (target.url) ctx.log(`  ${cyan(target.url)}`);
+  ctx.log('');
+  const rows = target.connected
+    ? [
+        ['Repository', `${repo.provider_type}.com/${repo.provider_account_name}/${repo.repo_name}`],
+        ['Branch', `${repo.branch}${target.config.previews_enabled ? dim(`  ${sym.dot}  previews on`) : ''}`],
+        settings.root_directory && settings.root_directory !== '/' ? ['Root', settings.root_directory] : null,
+        ['Build', settings.build_command || dim('none')],
+        ['Deploy', settings.deploy_command || dim('none')],
+      ]
+    : [['Repository', dim('not connected to Git')]];
+  for (const line of fields(rows)) ctx.log(line);
+  printBuilds(ctx, workerBuildItems(builds, target.productionBranch));
+  return 0;
+}
+
+async function statusCommand(ctx) {
+  const s = await session(ctx);
+  const target = await resolveTarget(ctx, s);
+  return target.kind === 'pages' ? pagesStatus(ctx, s, target) : workerStatus(ctx, s, target);
+}
+
+async function logsCommand(ctx) {
+  const s = await session(ctx);
+  const { client, accountId } = s;
+  const target = await resolveTarget(ctx, s);
+  const wanted = ctx.args[0];
+
+  let builds;
+  if (target.kind === 'pages') {
+    const deployments = await busy('Loading the latest deployments', () => client.listDeployments(accountId, target.name, 20));
+    builds = deployments.map((d) => ({ id: d.id, short: d.short_id, running: deploymentState(d) === 'running' }));
+  } else {
+    const list = await busy('Loading the latest builds', () => client.listWorkerBuilds(accountId, target.tag, 20));
+    builds = list.map((b) => ({ id: b.build_uuid, short: (b.build_uuid || '').slice(0, 8), running: buildState(b) === 'running' }));
+  }
+  const build = wanted ? builds.find((b) => b.id === wanted || b.short === wanted || b.id.startsWith(wanted)) : builds[0];
+  if (!build) throw new Fail(wanted ? `No recent build matches "${wanted}".` : `${target.name} has no builds yet.`);
+
+  if (ctx.flags.follow && build.running) {
+    const state = await tail(ctx, target, build.id);
     return state === 'success' ? 0 : 1;
   }
-  const lines = await busy('Loading the build log', () => client.deploymentLogs(accountId, project.name, deployment.id));
+  const lines = await busy('Loading the build log', () => target.logs(build.id));
   for (const entry of lines) ctx.log(entry.line);
   return 0;
 }
 
 async function listCommand(ctx) {
-  const { client, accountId } = await session(ctx);
-  const projects = await busy('Loading your projects', () => client.listProjects(accountId));
+  const s = await session(ctx);
+  const { client, accountId, source } = s;
+  const [projects, scripts, subdomain] = await busy('Loading your projects', () =>
+    Promise.all([
+      client.listProjects(accountId).catch((error) => {
+        if (isAuthError(error)) return [];
+        throw error;
+      }),
+      client.listScripts(accountId).catch(() => []),
+      client.workersSubdomain(accountId).catch(() => null),
+    ]),
+  );
+
+  const rows = projects.map((project) => {
+    const config = project.source?.config;
+    const from = config ? `${project.source.type}.com/${config.owner}/${config.repo_name}` : dim('direct upload');
+    return [bold(project.name), 'Pages', cyan(siteUrl(project)), from];
+  });
+  const canReadBuilds = source !== 'browser';
+  const configs = canReadBuilds
+    ? await busy('Loading your Workers', () => Promise.all(scripts.slice(0, 30).map((x) => client.getWorkerBuildConfig(accountId, x.tag).catch(() => undefined))))
+    : [];
+  scripts.forEach((script, i) => {
+    const repo = configs[i]?.git_repository;
+    const from = repo
+      ? `${repo.provider_type}.com/${repo.provider_account_name}/${repo.repo_name}`
+      : dim(canReadBuilds && configs[i] === null ? 'not connected to Git' : 'unknown without an API token');
+    rows.push([bold(script.id), 'Worker', subdomain ? cyan(`https://${script.id}.${subdomain}.workers.dev`) : '', from]);
+  });
+
   ctx.log('');
-  if (!projects.length) {
-    ctx.log('  No Pages projects in this account yet. Run "flareship import" inside a repository.');
+  if (!rows.length) {
+    ctx.log('  Nothing in this account yet. Run "flareship import" inside a repository.');
   } else {
-    const rows = projects.map((project) => {
-      const config = project.source?.config;
-      const from = config ? `${project.source.type}.com/${config.owner}/${config.repo_name}` : dim('direct upload');
-      return [bold(project.name), cyan(siteUrl(project)), from];
-    });
-    for (const line of table(rows, { header: ['project', 'address', 'source'], gap: 3 })) ctx.log(line);
+    for (const line of table(rows, { header: ['name', 'type', 'address', 'source'], gap: 3 })) ctx.log(line);
     ctx.log('');
-    ctx.log(dim(`  ${projects.length} project${projects.length === 1 ? '' : 's'}`));
+    ctx.log(dim(`  ${projects.length} Pages project${projects.length === 1 ? '' : 's'} ${sym.dot} ${scripts.length} Worker${scripts.length === 1 ? '' : 's'}`));
   }
   ctx.log('');
   return 0;
@@ -531,11 +889,11 @@ function openInBrowser(url) {
 }
 
 async function openCommand(ctx) {
-  const { client, accountId } = await session(ctx);
-  const project = await resolveProject(ctx, client, accountId);
-  const url = siteUrl(project);
-  ctx.log(url);
-  if (!ctx.env.FLARESHIP_NO_BROWSER) openInBrowser(url);
+  const s = await session(ctx);
+  const target = await resolveTarget(ctx, s, { builds: false });
+  if (!target.url) throw new Fail(`${target.name} has no public address: this account has no workers.dev subdomain.`);
+  ctx.log(target.url);
+  if (!ctx.env.FLARESHIP_NO_BROWSER) openInBrowser(target.url);
   return 0;
 }
 
@@ -545,7 +903,7 @@ async function browserLogin(ctx) {
     ctx.log(`  Cloudflare is already signed in on this machine ${dim('(wrangler)')}`);
   } else {
     ctx.log('  Opening your browser to sign in to Cloudflare. Click "Allow" there.');
-    ctx.log(dim('  The first time, this downloads Cloudflare\'s wrangler and can take a minute.'));
+    ctx.log(dim("  The first time, this downloads Cloudflare's wrangler and can take a minute."));
     if (!(await wranglerLogin(ctx.env))) throw new Fail('The browser sign-in did not finish. Run "flareship login" again, or use "flareship login --token".');
     token = await browserToken(ctx, { fresh: true });
     if (!token) throw new Fail('Signed in, but the session could not be read back. Try "flareship login --token".');
@@ -561,12 +919,11 @@ async function browserLogin(ctx) {
 async function tokenLogin(ctx) {
   ctx.log(`  1. Open ${cyan(LINKS.tokens)}`);
   ctx.log('  2. Create Token -> Custom token -> Get started  (not one of the templates)');
-  ctx.log('  3. Add exactly two permissions:');
-  ctx.log('       Account | Cloudflare Pages | Edit');
-  ctx.log('       Account | Account Settings | Read');
+  ctx.log('  3. Add only the permissions you need from this list:');
+  for (const line of TOKEN_PERMISSIONS) ctx.log(`       ${line}`);
   ctx.log('  4. Account Resources: Include | your account -> Continue to summary');
-  ctx.log('  5. Check that only those two permissions are listed -> Create Token -> copy it');
-  const token = await askSecret('Paste the token (hidden)');
+  ctx.log('  5. Check that only those permissions are listed -> Create Token -> copy it');
+  const token = await askSecret('  Paste the token (hidden)');
   if (!token) throw new Fail('No token entered.');
 
   const client = createClient({ token, base: ctx.env.FLARESHIP_API_BASE });
@@ -582,22 +939,23 @@ async function tokenLogin(ctx) {
     } else {
       if (accounts.length > 1) for (const account of accounts) ctx.log(`  ${account.name} ${dim(account.id)}`);
       else {
-        ctx.log('This token cannot find your account by itself (it lacks "Account Settings: Read").');
-        ctx.log(`Open ${cyan(LINKS.accountHome)} and copy the address from the browser's address bar.`);
+        ctx.log('  This token cannot find your account by itself (it lacks "Account Settings: Read").');
+        ctx.log(`  Open ${cyan(LINKS.accountHome)} and copy the address from the browser's address bar.`);
       }
-      accountId = extractAccountId(await ask('Paste that address, or the Account ID'));
+      accountId = extractAccountId(await ask('  Paste that address, or the Account ID'));
       if (!accountId) throw new Fail('That does not contain an Account ID (32 letters and digits).');
     }
   }
 
-  try {
-    await client.listProjects(accountId);
-  } catch (error) {
-    if (error instanceof ApiError) {
-      throw new Fail(`The token works but cannot read Pages projects in that account: ${error.message}\nCheck the "Cloudflare Pages: Edit" permission and the Account ID.`);
-    }
-    throw error;
+  const can = await busy('Checking what the token can do', async () => ({
+    pages: await client.listProjects(accountId).then(() => true, () => false),
+    workers: await client.listBuildTokens(accountId).then(() => true, () => false),
+  }));
+  if (!can.pages && !can.workers) {
+    throw new Fail('The token works but can manage neither Pages projects nor Workers builds in that account.\nCheck its permissions and the Account ID.');
   }
+  ctx.log(can.pages ? ok('Can manage Pages projects') : warn('Cannot manage Pages projects (no "Cloudflare Pages: Edit")'));
+  ctx.log(can.workers ? ok('Can manage Workers builds') : warn('Cannot manage Workers builds (no "Workers Builds Configuration: Edit")'));
   const file = saveConfig({ token, accountId }, ctx.env);
   ctx.log(ok(`Saved in ${file}`));
   return { client, accountId, source: 'token' };
@@ -624,8 +982,8 @@ async function guideCommand(ctx) {
 }
 
 async function logoutCommand(ctx) {
-  ctx.log('');
   clearSession(ctx.env);
+  ctx.log('');
   ctx.log(clearConfig(ctx.env) ? ok(`Removed ${configPath(ctx.env)}`) : '  Nothing was saved.');
   ctx.log(dim('  The Cloudflare browser sign-in belongs to wrangler. To end it too, run: npx wrangler logout'));
   ctx.log('');
@@ -634,10 +992,23 @@ async function logoutCommand(ctx) {
 
 async function whoamiCommand(ctx) {
   const { client, accountId, source } = await session(ctx);
-  const projects = await busy('Loading your projects', () => client.listProjects(accountId));
+  const [projects, scripts, builds] = await busy('Loading your account', () =>
+    Promise.all([
+      client.listProjects(accountId).then((list) => list.length, () => null),
+      client.listScripts(accountId).then((list) => list.length, () => null),
+      source === 'browser' ? false : client.listBuildTokens(accountId).then(() => true, () => false),
+    ]),
+  );
   const how = { env: 'CLOUDFLARE_API_TOKEN', token: `API token saved in ${configPath(ctx.env)}`, browser: 'Cloudflare browser sign-in (wrangler)' }[source];
   ctx.log('');
-  for (const line of fields([['Signed in', how], ['Account', accountId], ['Projects', String(projects.length)]])) ctx.log(line);
+  const rows = [
+    ['Signed in', how],
+    ['Account', accountId],
+    ['Pages', projects === null ? dim('no access') : `${projects} project${projects === 1 ? '' : 's'}`],
+    ['Workers', scripts === null ? dim('no access') : `${scripts} Worker${scripts === 1 ? '' : 's'}`],
+    ['Workers builds', builds ? 'available' : dim(source === 'browser' ? 'needs an API token: flareship login --token' : 'no access with this token')],
+  ];
+  for (const line of fields(rows)) ctx.log(line);
   ctx.log('');
   return 0;
 }

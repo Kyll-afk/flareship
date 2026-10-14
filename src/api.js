@@ -14,6 +14,7 @@ export class ApiError extends Error {
 }
 
 const AUTH_CODES = [10000, 10001, 9106, 9109];
+const NO_BUILD_CONFIG = 12040;
 
 export function isAuthError(error) {
   return error instanceof ApiError && (error.status === 401 || error.status === 403 || AUTH_CODES.some((code) => error.has(code)));
@@ -123,6 +124,68 @@ export function createClient({ token, base, refresh, fetchImpl = globalThis.fetc
     async deploymentLogs(accountId, name, id) {
       const reply = await request('GET', `${project(accountId, name)}/deployments/${id}/history/logs`);
       return reply.result?.data || [];
+    },
+
+    async listScripts(accountId) {
+      return (await request('GET', `/accounts/${accountId}/workers/scripts`)).result || [];
+    },
+
+    async workersSubdomain(accountId) {
+      return (await request('GET', `/accounts/${accountId}/workers/subdomain`)).result?.subdomain || null;
+    },
+
+    async createPlaceholderWorker(accountId, name) {
+      const code = "export default { fetch() { return new Response('The first build is still running.', { status: 503 }); } };\n";
+      const form = new FormData();
+      form.set('metadata', JSON.stringify({ main_module: 'index.js', compatibility_date: '2025-01-01' }));
+      form.set('index.js', new Blob([code], { type: 'application/javascript+module' }), 'index.js');
+      return (await request('PUT', `/accounts/${accountId}/workers/scripts/${encodeURIComponent(name)}`, { form })).result;
+    },
+
+    async listBuildTokens(accountId) {
+      return (await request('GET', `/accounts/${accountId}/builds/tokens`)).result || [];
+    },
+
+    async getWorkerBuildConfig(accountId, tag) {
+      try {
+        return (await request('GET', `/accounts/${accountId}/builds/workers/${tag}`)).result;
+      } catch (error) {
+        if (error instanceof ApiError && (error.has(NO_BUILD_CONFIG) || error.status === 404)) return null;
+        throw error;
+      }
+    },
+
+    async createWorkerBuildConfig(accountId, body) {
+      return (await request('POST', `/accounts/${accountId}/builds/workers`, { body })).result;
+    },
+
+    async listTriggers(accountId, tag) {
+      return (await request('GET', `/accounts/${accountId}/builds/workers/${tag}/triggers`)).result || [];
+    },
+
+    async startBuild(accountId, triggerId, branch) {
+      return (await request('POST', `/accounts/${accountId}/builds/triggers/${triggerId}/builds`, { body: { branch } })).result;
+    },
+
+    async listWorkerBuilds(accountId, tag, perPage = 10) {
+      const reply = await request('GET', `/accounts/${accountId}/builds/workers/${tag}/builds`, { query: { per_page: perPage } });
+      return Array.isArray(reply.result) ? reply.result : reply.result?.builds || [];
+    },
+
+    async getBuild(accountId, id) {
+      return (await request('GET', `/accounts/${accountId}/builds/builds/${id}`)).result;
+    },
+
+    async buildLogs(accountId, id) {
+      const lines = [];
+      let cursor;
+      for (let page = 0; page < 50; page++) {
+        const result = (await request('GET', `/accounts/${accountId}/builds/builds/${id}/logs`, { query: { cursor } })).result || {};
+        for (const entry of result.lines || []) lines.push({ line: Array.isArray(entry) ? String(entry[1] ?? '') : String(entry) });
+        if (!result.truncated || !result.cursor || result.cursor === cursor) break;
+        cursor = result.cursor;
+      }
+      return lines;
     },
   };
 }

@@ -8,7 +8,7 @@ import { after, before, test } from 'node:test';
 import { run } from '../src/cli.js';
 
 const ACCOUNT = 'acc123';
-const state = { projects: [], requests: [], polls: 0, denyRepo: 'locked' };
+const state = { projects: [], requests: [], polls: 0, denyRepo: 'locked', scripts: [], workerConfigs: {}, buildPolls: 0 };
 let server;
 let base;
 
@@ -46,6 +46,9 @@ before(async () => {
     };
     const prefix = `/v4/accounts/${ACCOUNT}/pages/projects`;
 
+    if (url.pathname === '/github/repos/Acme/edge-api') {
+      return send(200, { id: 777, name: 'edge-api', owner: { id: 42, login: 'Acme' } });
+    }
     if (request.headers.authorization !== 'Bearer good-token') {
       return send(403, { success: false, errors: [{ code: 10000, message: 'Authentication error' }] });
     }
@@ -72,6 +75,50 @@ before(async () => {
       const lines = ['Cloning repository...', 'Running build command', 'Success: Your site was deployed!'];
       return send(200, { success: true, result: { data: lines.slice(0, state.polls + 1).map((line) => ({ line })) } });
     }
+    const account = `/v4/accounts/${ACCOUNT}`;
+    const route = `${request.method} ${url.pathname.slice(account.length)}`;
+    const build = (done) => ({
+      build_uuid: 'bld00001-full',
+      status: done ? 'stopped' : 'running',
+      build_outcome: done ? 'success' : null,
+      created_on: new Date().toISOString(),
+      build_trigger_metadata: { branch: 'main', commit_hash: 'fedcba9876543', commit_message: 'Add the edge API', build_trigger_source: 'push' },
+    });
+    if (route === 'GET /workers/scripts') return send(200, { success: true, result: state.scripts });
+    if (route === 'GET /workers/subdomain') return send(200, { success: true, result: { subdomain: 'acme' } });
+    if (route === 'PUT /workers/scripts/edge-api') {
+      state.scripts.push({ id: 'edge-api', tag: 'tag-edge-api' });
+      return send(200, { success: true, result: { id: 'edge-api' } });
+    }
+    if (route === 'GET /builds/tokens') return send(200, { success: true, result: [{ build_token_uuid: 'bt-1', build_token_name: 'main build token' }] });
+    if (route === 'GET /builds/workers/tag-edge-api') {
+      const config = state.workerConfigs['tag-edge-api'];
+      if (!config) return send(404, { success: false, errors: [{ code: 12040, message: 'No build configuration associated with that script tag' }] });
+      return send(200, { success: true, result: config });
+    }
+    if (route === 'POST /builds/workers') {
+      const wanted = JSON.parse(text);
+      state.workerConfigs[wanted.script_tag] = wanted;
+      return send(200, { success: true, result: wanted });
+    }
+    if (route === 'GET /builds/workers/tag-edge-api/triggers') {
+      const config = state.workerConfigs['tag-edge-api'];
+      const triggers = config ? [{ trigger_uuid: 'trg-1', branch_includes: [config.git_repository.branch], branch_excludes: [], deleted_on: null }] : [];
+      return send(200, { success: true, result: triggers });
+    }
+    if (route === 'POST /builds/triggers/trg-1/builds') {
+      state.buildPolls = 0;
+      return send(200, { success: true, result: build(false) });
+    }
+    if (route === 'GET /builds/builds/bld00001-full') {
+      state.buildPolls += 1;
+      return send(200, { success: true, result: build(state.buildPolls >= 2) });
+    }
+    if (route === 'GET /builds/builds/bld00001-full/logs') {
+      const lines = ['Cloning repository', 'Running: npm run build', 'Deployed edge-api'];
+      return send(200, { success: true, result: { cursor: 'c1', truncated: false, lines: lines.slice(0, state.buildPolls + 1).map((line) => [Date.now(), line]) } });
+    }
+    if (route === 'GET /builds/workers/tag-edge-api/builds') return send(200, { success: true, result: [build(true)] });
     return send(404, { success: false, errors: [{ code: 7003, message: `No route for ${request.method} ${url.pathname}` }] });
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -101,6 +148,8 @@ async function flareship(cwd, argv, extraEnv = {}) {
     FLARESHIP_CONFIG: path.join(os.tmpdir(), 'flareship-test-missing-config.json'),
     FLARESHIP_NO_BROWSER: '1',
     FLARESHIP_NO_WRANGLER: '1',
+    FLARESHIP_NO_GIT_CREDENTIALS: '1',
+    FLARESHIP_GITHUB_API: `${base.replace(/\/v4$/, '')}/github`,
     ...extraEnv,
   };
   const code = await run(argv, { cwd, env, interactive: false, log: (line) => lines.push(String(line)), err: (line) => lines.push(String(line)) });
@@ -149,7 +198,7 @@ test('status, logs and open work on the connected project', async () => {
   const dir = repo('demo_site', { 'index.html': '<html>' });
   const status = await flareship(dir, ['status']);
   assert.equal(status.code, 0, status.output);
-  assert.match(status.output, /demo-site\s+\S+ live\n\s+https:\/\/demo-site\.pages\.dev/);
+  assert.match(status.output, /demo-site\s+Pages\s+\S+ live\n\s+https:\/\/demo-site\.pages\.dev/);
   assert.match(status.output, /npm run build/);
   assert.match(status.output, /abcdef1/);
 
@@ -209,4 +258,98 @@ test('help and guide print without touching the network', async () => {
   assert.match(guide.output, /workers-and-pages\/create\/pages/);
   assert.match(guide.output, /github\.com\/settings\/installations/);
   assert.equal(state.requests.length, count);
+});
+
+const WRANGLER_JSONC = `{
+  // the Worker's name must match the one on Cloudflare
+  "name": "edge-api",
+  "main": "src/index.js", /* entry */
+  "compatibility_date": "2025-01-01",
+}
+`;
+
+function workerRepo() {
+  return repo('edge-api', {
+    'wrangler.jsonc': WRANGLER_JSONC,
+    'package.json': JSON.stringify({ scripts: { build: 'node build.js' } }),
+  });
+}
+
+test('import connects a repository with a wrangler config as a Worker', async () => {
+  const dir = workerRepo();
+  const { code, output } = await flareship(dir, ['import', '--yes']);
+
+  assert.equal(code, 0, output);
+  assert.match(output, /Worker edge-api/);
+  assert.match(output, /Created the Worker edge-api/);
+  assert.match(output, /Connected edge-api to github\.com\/Acme\/edge-api/);
+  assert.match(output, /Deployed edge-api/);
+  assert.match(output, /Live at https:\/\/edge-api\.acme\.workers\.dev/);
+
+  const settings = (deploy) => ({
+    build_command: 'npm run build',
+    deploy_command: deploy,
+    root_directory: '/',
+    build_caching_enabled: true,
+    path_includes: ['*'],
+    path_excludes: [],
+    build_token_uuid: 'bt-1',
+  });
+  assert.deepEqual(state.workerConfigs['tag-edge-api'], {
+    script_tag: 'tag-edge-api',
+    git_repository: { provider_type: 'github', provider_account_id: '42', provider_account_name: 'Acme', repo_id: '777', repo_name: 'edge-api', branch: 'main' },
+    production_settings: settings('npx wrangler deploy'),
+    previews_enabled: true,
+    previews_base_config: settings('npx wrangler preview'),
+  });
+  assert.equal(state.requests.filter((r) => r.path.endsWith('/pages/projects') && r.method === 'POST' && r.text.includes('edge-api')).length, 0);
+});
+
+test('a connected Worker is not imported twice, and status, logs, deploy and open work on it', async () => {
+  const dir = workerRepo();
+  const again = await flareship(dir, ['import', '--yes']);
+  assert.equal(again.code, 0, again.output);
+  assert.match(again.output, /edge-api is already connected/);
+  assert.equal(state.scripts.length, 1);
+
+  const status = await flareship(dir, ['status']);
+  assert.equal(status.code, 0, status.output);
+  assert.match(status.output, /edge-api\s+Worker\s+\S+ live\n\s+https:\/\/edge-api\.acme\.workers\.dev/);
+  assert.match(status.output, /github\.com\/Acme\/edge-api/);
+  assert.match(status.output, /npx wrangler deploy/);
+  assert.match(status.output, /bld00001\s+production\s+main\s+fedcba9\s+Add the edge API/);
+
+  const logs = await flareship(dir, ['logs', 'bld00001']);
+  assert.equal(logs.code, 0, logs.output);
+  assert.match(logs.output, /Running: npm run build/);
+
+  const deploy = await flareship(dir, ['deploy']);
+  assert.equal(deploy.code, 0, deploy.output);
+  assert.match(deploy.output, /Building edge-api from main/);
+  assert.match(deploy.output, /Live at https:\/\/edge-api\.acme\.workers\.dev/);
+
+  const open = await flareship(dir, ['open']);
+  assert.equal(open.output.trim(), 'https://edge-api.acme.workers.dev');
+
+  const byName = await flareship(os.tmpdir(), ['status', '--name', 'edge-api']);
+  assert.equal(byName.code, 0, byName.output);
+  assert.match(byName.output, /edge-api\s+Worker/);
+});
+
+test('list shows Pages projects and Workers together', async () => {
+  const { code, output } = await flareship(os.tmpdir(), ['list']);
+  assert.equal(code, 0, output);
+  assert.match(output, /demo-site\s+Pages\s+https:\/\/demo-site\.pages\.dev\s+github\.com\/Acme\/Demo_Site/);
+  assert.match(output, /edge-api\s+Worker\s+https:\/\/edge-api\.acme\.workers\.dev\s+github\.com\/Acme\/edge-api/);
+});
+
+test('importing a Worker needs a wrangler config, and --pages overrides the choice', async () => {
+  const plain = repo('plain-site', { 'public/index.html': '<html>' });
+  const forced = await flareship(plain, ['import', '--yes', '--workers']);
+  assert.equal(forced.code, 1);
+  assert.match(forced.output, /needs a wrangler configuration file/);
+
+  const both = await flareship(plain, ['import', '--workers', '--pages']);
+  assert.equal(both.code, 1);
+  assert.match(both.output, /not both/);
 });

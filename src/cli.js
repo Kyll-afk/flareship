@@ -4,7 +4,7 @@ import { HELP, commands } from './commands.js';
 import { Fail } from './errors.js';
 import { red, sym } from './ui.js';
 
-const BOOLEAN = new Set(['yes', 'follow', 'help', 'version', 'no-previews', 'token']);
+const BOOLEAN = new Set(['yes', 'follow', 'help', 'version', 'no-previews', 'token', 'workers', 'pages']);
 const VALUED = new Set(['name', 'build', 'out', 'root', 'branch']);
 const ALIAS = { y: 'yes', f: 'follow', h: 'help', v: 'version' };
 

@@ -5,8 +5,8 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { ApiError, createClient } from '../src/api.js';
 import { parseArgs } from '../src/cli.js';
-import { cleanFolder, deploymentState, extractAccountId, findProjectForRepo, sanitizeName } from '../src/commands.js';
-import { detect } from '../src/detect.js';
+import { buildState, cleanFolder, deploymentState, extractAccountId, findProjectForRepo, sanitizeName } from '../src/commands.js';
+import { detect, readWranglerConfig } from '../src/detect.js';
 import { Fail } from '../src/errors.js';
 import { parseRemote } from '../src/git.js';
 import { ago } from '../src/ui.js';
@@ -198,4 +198,24 @@ test('the API client fetches a fresh token once when the cached one is rejected'
 
   const stuck = createClient({ token: 'stale', refresh: async () => 'stale', fetchImpl });
   await assert.rejects(() => stuck.listAccounts(), /Authentication error/);
+});
+
+test('buildState reads a Workers build', () => {
+  assert.equal(buildState({ status: 'queued' }), 'running');
+  assert.equal(buildState({ status: 'running' }), 'running');
+  assert.equal(buildState({ status: 'stopped', build_outcome: 'success' }), 'success');
+  assert.equal(buildState({ status: 'stopped', build_outcome: 'fail' }), 'failure');
+  assert.equal(buildState({ status: 'stopped', build_outcome: 'terminated' }), 'failure');
+  assert.equal(buildState({ status: 'stopped', build_outcome: 'cancelled' }), 'canceled');
+});
+
+test('readWranglerConfig finds the Worker name in jsonc, json and toml', () => {
+  const jsonc = '{\n  // comment with "quotes" and https://example.com\n  "name": "api", /* x */\n  "vars": { "URL": "https://a.b//c" },\n}\n';
+  assert.deepEqual(readWranglerConfig(project({ 'wrangler.jsonc': jsonc })), { file: 'wrangler.jsonc', name: 'api', pages: false });
+  assert.deepEqual(readWranglerConfig(project({ 'wrangler.json': { name: 'site', pages_build_output_dir: 'dist' } })), { file: 'wrangler.json', name: 'site', pages: true });
+
+  const toml = 'name = "edge"\ncompatibility_date = "2025-01-01"\n\n[vars]\nname = "not-this"\n';
+  assert.deepEqual(readWranglerConfig(project({ 'wrangler.toml': toml })), { file: 'wrangler.toml', name: 'edge', pages: false });
+  assert.deepEqual(readWranglerConfig(project({ 'wrangler.toml': '[vars]\nname = "x"\n' })), { file: 'wrangler.toml', name: null, pages: false });
+  assert.equal(readWranglerConfig(project({ 'index.html': '' })), null);
 });
