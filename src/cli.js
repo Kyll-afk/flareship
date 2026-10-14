@@ -1,8 +1,9 @@
 import { readFileSync } from 'node:fs';
 import { ApiError } from './api.js';
-import { HELP, commands } from './commands.js';
+import { HELP, commands, openInBrowser } from './commands.js';
 import { Fail } from './errors.js';
-import { red, sym } from './ui.js';
+import { ask, askSecret, confirm, red, sym } from './ui.js';
+import { wranglerLogin, wranglerToken } from './wrangler.js';
 
 const BOOLEAN = new Set(['yes', 'follow', 'help', 'version', 'no-previews', 'token', 'workers', 'pages']);
 const VALUED = new Set(['name', 'build', 'out', 'root', 'branch']);
@@ -67,6 +68,7 @@ export async function run(argv, io = {}) {
       log,
       interactive,
       prompts: interactive && !flags.yes,
+      deps: { ask, askSecret, confirm, wranglerToken, wranglerLogin, open: openInBrowser, ...io.deps },
       args,
       flags,
     });

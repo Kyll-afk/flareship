@@ -10,9 +10,9 @@ export const green = paint(32);
 export const yellow = paint(33);
 export const cyan = paint(36);
 
-function question(prompt, { hidden = false } = {}) {
+function question(prompt, { hidden = false, input = process.stdin, output = process.stdout } = {}) {
   return new Promise((resolve) => {
-    const rl = readline.createInterface({ input: process.stdin, output: process.stdout, terminal: true });
+    const rl = readline.createInterface({ input, output, terminal: true });
     if (hidden) {
       const write = rl._writeToOutput.bind(rl);
       rl._writeToOutput = (text) => {
@@ -21,24 +21,24 @@ function question(prompt, { hidden = false } = {}) {
     }
     rl.question(prompt, (answer) => {
       rl.close();
-      if (hidden) process.stdout.write('\n');
+      if (hidden) output.write('\n');
       resolve(answer.trim());
     });
   });
 }
 
-export async function ask(label, fallback = '') {
+export async function ask(label, fallback = '', streams = {}) {
   const hint = fallback ? dim(` (${fallback})`) : '';
-  const answer = await question(`${label}${hint}: `);
+  const answer = await question(`${label}${hint}: `, streams);
   return answer || fallback;
 }
 
-export function askSecret(label) {
-  return question(`${label}: `, { hidden: true });
+export function askSecret(label, streams = {}) {
+  return question(`${label}: `, { ...streams, hidden: true });
 }
 
-export async function confirm(label, fallback = true) {
-  const answer = (await question(`${label} ${dim(fallback ? '(Y/n)' : '(y/N)')} `)).toLowerCase();
+export async function confirm(label, fallback = true, streams = {}) {
+  const answer = (await question(`${label} ${dim(fallback ? '(Y/n)' : '(y/N)')} `, streams)).toLowerCase();
   if (!answer) return fallback;
   return answer === 'y' || answer === 'yes';
 }
@@ -85,9 +85,8 @@ export function table(rows, { header, indent = 2, gap = 2 } = {}) {
   return all.map((row) => (' '.repeat(indent) + row.map((cell, i) => pad(cell, sizes[i] + gap)).join('')).trimEnd());
 }
 
-export function spinner(label) {
-  const stream = process.stderr;
-  if (!stream.isTTY || process.env.CI || process.env.FLARESHIP_NO_SPINNER) {
+export function spinner(label, { stream = process.stderr, env = process.env } = {}) {
+  if (!stream.isTTY || env.CI || env.FLARESHIP_NO_SPINNER) {
     return { text() {}, clear() {}, stop() {} };
   }
   const started = Date.now();
@@ -112,8 +111,8 @@ export function spinner(label) {
   };
 }
 
-export async function busy(label, task) {
-  const progress = spinner(label);
+export async function busy(label, task, options) {
+  const progress = spinner(label, options);
   try {
     return await task();
   } finally {

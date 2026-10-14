@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { Fail } from './errors.js';
 
-function run(command, args, { input, env, cwd } = {}) {
+export function run(command, args, { input, env, cwd } = {}) {
   return new Promise((resolve) => {
     let child;
     try {
@@ -29,17 +29,17 @@ function run(command, args, { input, env, cwd } = {}) {
   });
 }
 
-async function localToken(env, cwd) {
+export async function localToken(env, cwd, exec = run) {
   if (env.GH_TOKEN || env.GITHUB_TOKEN) return env.GH_TOKEN || env.GITHUB_TOKEN;
   if (env.FLARESHIP_NO_GIT_CREDENTIALS) return null;
-  const fromGh = await run('gh', ['auth', 'token'], { env, cwd });
+  const fromGh = await exec('gh', ['auth', 'token'], { env, cwd });
   if (fromGh?.trim()) return fromGh.trim();
   const quiet = { ...env, GIT_TERMINAL_PROMPT: '0', GCM_INTERACTIVE: 'Never' };
-  const filled = await run('git', ['credential', 'fill'], { env: quiet, cwd, input: 'protocol=https\nhost=github.com\n\n' });
+  const filled = await exec('git', ['credential', 'fill'], { env: quiet, cwd, input: 'protocol=https\nhost=github.com\n\n' });
   return filled?.match(/^password=(.+)$/m)?.[1]?.trim() || null;
 }
 
-export async function githubRepo(remote, { env = process.env, cwd, fetchImpl = globalThis.fetch } = {}) {
+export async function githubRepo(remote, { env = process.env, cwd, fetchImpl = globalThis.fetch, exec } = {}) {
   const base = (env.FLARESHIP_GITHUB_API || 'https://api.github.com').replace(/\/+$/, '');
   const read = async (token) => {
     const headers = { Accept: 'application/vnd.github+json', 'User-Agent': 'flareship' };
@@ -53,7 +53,7 @@ export async function githubRepo(remote, { env = process.env, cwd, fetchImpl = g
 
   let response = await read(null);
   if (!response.ok) {
-    const token = await localToken(env, cwd);
+    const token = await localToken(env, cwd, exec);
     if (token) response = await read(token);
   }
   if (!response.ok) {

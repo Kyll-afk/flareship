@@ -7,8 +7,7 @@ import { detect, readWranglerConfig } from './detect.js';
 import { Fail } from './errors.js';
 import { readRepo } from './git.js';
 import { githubRepo } from './github.js';
-import { wranglerLogin, wranglerToken } from './wrangler.js';
-import { ago, ask, askSecret, bold, busy, columns, confirm, cyan, dim, fields, green, red, spinner, sym, table, truncate, yellow } from './ui.js';
+import { ago, bold, busy, columns, cyan, dim, fields, green, red, spinner, sym, table, truncate, yellow } from './ui.js';
 
 const NO_GIT_ACCESS = [8000011, 8000012];
 const TAIL_LIMIT_MS = 20 * 60 * 1000;
@@ -209,7 +208,7 @@ async function browserToken(ctx, { fresh = false } = {}) {
     const cached = loadSession(ctx.env);
     if (cached.token && Date.now() - cached.savedAt < SESSION_TTL_MS) return cached.token;
   }
-  const token = await busy('Checking the Cloudflare sign-in', () => wranglerToken(ctx.env));
+  const token = await busy('Checking the Cloudflare sign-in', () => ctx.deps.wranglerToken(ctx.env));
   if (token) saveSession({ token, savedAt: Date.now() }, ctx.env);
   else clearSession(ctx.env);
   return token;
@@ -247,7 +246,7 @@ async function pickAccount(ctx, client) {
   const lines = accounts.map((a, i) => `  ${i + 1}. ${a.name} ${dim(a.id)}`).join('\n');
   if (!ctx.prompts) throw new Fail(`This token can see several accounts. Set CLOUDFLARE_ACCOUNT_ID to one of:\n${lines}`);
   ctx.log(`This token can see several accounts:\n${lines}`);
-  const choice = Number(await ask('Which one', '1'));
+  const choice = Number(await ctx.deps.ask('Which one', '1'));
   const account = accounts[choice - 1];
   if (!account) throw new Fail('That is not one of the listed accounts.');
   return account.id;
@@ -381,6 +380,7 @@ function gitAccessHelp(remote, accountId) {
 
 async function tail(ctx, target, id, indent = '  ') {
   const interval = Number(ctx.env.FLARESHIP_POLL_MS) || 3000;
+  const limit = Number(ctx.env.FLARESHIP_TAIL_LIMIT_MS) || TAIL_LIMIT_MS;
   const started = Date.now();
   const progress = spinner('Waiting for the build to start');
   let printed = 0;
@@ -406,7 +406,7 @@ async function tail(ctx, target, id, indent = '  ') {
         return state;
       }
       progress.text(label || 'Building');
-      if (Date.now() - started > TAIL_LIMIT_MS) return 'running';
+      if (Date.now() - started > limit) return 'running';
       await sleep(interval);
     }
   } finally {
@@ -426,7 +426,7 @@ async function deployAndFollow(ctx, target, branch, indent = '  ') {
     return 0;
   }
   if (state === 'running') {
-    ctx.log(warn('Still building after 20 minutes. Check it with "flareship status".', indent));
+    ctx.log(warn('Still building after a long wait. Check it with "flareship status".', indent));
     ctx.log('');
     return 1;
   }
@@ -457,7 +457,7 @@ function printPlan(ctx, rows, warnings) {
 async function confirmPlan(ctx, question) {
   if (!ctx.prompts) return true;
   ctx.log('');
-  if (await confirm(`${IN}${question}`)) return true;
+  if (await ctx.deps.confirm(`${IN}${question}`)) return true;
   ctx.log(`${IN}Nothing was created.`);
   return false;
 }
@@ -494,10 +494,10 @@ async function importPages(ctx, s, repo) {
 
   if (ctx.prompts) {
     ctx.log('');
-    plan.name = sanitizeName(await ask(`${IN}Project name`, plan.name));
-    plan.branch = await ask(`${IN}Production branch`, plan.branch);
-    plan.build = cleanBuild(await ask(`${IN}Build command, or "none"`, plan.build || 'none'));
-    plan.out = cleanFolder(await ask(`${IN}Folder to publish, or "." for the whole repository`, plan.out || '.'));
+    plan.name = sanitizeName(await ctx.deps.ask(`${IN}Project name`, plan.name));
+    plan.branch = await ctx.deps.ask(`${IN}Production branch`, plan.branch);
+    plan.build = cleanBuild(await ctx.deps.ask(`${IN}Build command, or "none"`, plan.build || 'none'));
+    plan.out = cleanFolder(await ctx.deps.ask(`${IN}Folder to publish, or "." for the whole repository`, plan.out || '.'));
   } else if (plan.build === null || plan.out === null) {
     throw new Fail('Could not detect the build settings. Pass --build "<command>" (or --build none) and --out <folder>.');
   }
@@ -590,8 +590,8 @@ async function importWorker(ctx, s, repo, config) {
 
   if (ctx.prompts) {
     ctx.log('');
-    plan.branch = await ask(`${IN}Production branch`, plan.branch);
-    plan.build = cleanBuild(await ask(`${IN}Build command, or "none"`, plan.build || 'none'));
+    plan.branch = await ctx.deps.ask(`${IN}Production branch`, plan.branch);
+    plan.build = cleanBuild(await ctx.deps.ask(`${IN}Build command, or "none"`, plan.build || 'none'));
   }
 
   const tokens = await busy('Looking for a build token', () => client.listBuildTokens(accountId));
@@ -876,16 +876,16 @@ async function listCommand(ctx) {
   return 0;
 }
 
-function openInBrowser(url) {
-  const wsl = process.platform === 'linux' && os.release().toLowerCase().includes('microsoft');
+export function openInBrowser(url, { platform = process.platform, release = os.release(), spawnImpl = spawn } = {}) {
+  const wsl = platform === 'linux' && release.toLowerCase().includes('microsoft');
   const [command, args] =
-    process.platform === 'win32' || wsl
+    platform === 'win32' || wsl
       ? [wsl ? 'cmd.exe' : 'cmd', ['/c', 'start', '""', url]]
-      : process.platform === 'darwin'
+      : platform === 'darwin'
         ? ['open', [url]]
         : ['xdg-open', [url]];
   try {
-    const child = spawn(command, args, { stdio: 'ignore', detached: true });
+    const child = spawnImpl(command, args, { stdio: 'ignore', detached: true });
     child.on('error', () => {});
     child.unref();
   } catch {}
@@ -896,7 +896,7 @@ async function openCommand(ctx) {
   const target = await resolveTarget(ctx, s, { builds: false });
   if (!target.url) throw new Fail(`${target.name} has no public address: this account has no workers.dev subdomain.`);
   ctx.log(target.url);
-  if (!ctx.env.FLARESHIP_NO_BROWSER) openInBrowser(target.url);
+  if (!ctx.env.FLARESHIP_NO_BROWSER) ctx.deps.open(target.url);
   return 0;
 }
 
@@ -907,7 +907,7 @@ async function browserLogin(ctx) {
   } else {
     ctx.log('  Opening your browser to sign in to Cloudflare. Click "Allow" there.');
     ctx.log(dim("  The first time, this downloads Cloudflare's wrangler and can take a minute."));
-    if (!(await wranglerLogin(ctx.env))) throw new Fail('The browser sign-in did not finish. Run "flareship login" again, or use "flareship login --token".');
+    if (!(await ctx.deps.wranglerLogin(ctx.env))) throw new Fail('The browser sign-in did not finish. Run "flareship login" again, or use "flareship login --token".');
     token = await browserToken(ctx, { fresh: true });
     if (!token) throw new Fail('Signed in, but the session could not be read back. Try "flareship login --token".');
   }
@@ -926,7 +926,7 @@ async function tokenLogin(ctx) {
   for (const line of TOKEN_PERMISSIONS) ctx.log(`       ${line}`);
   ctx.log('  4. Account Resources: Include | your account -> Continue to summary');
   ctx.log('  5. Check that only those permissions are listed -> Create Token -> copy it');
-  const token = await askSecret('  Paste the token (hidden)');
+  const token = await ctx.deps.askSecret('  Paste the token (hidden)');
   if (!token) throw new Fail('No token entered.');
 
   const client = createClient({ token, base: ctx.env.FLARESHIP_API_BASE });
@@ -945,7 +945,7 @@ async function tokenLogin(ctx) {
         ctx.log('  This token cannot find your account by itself (it lacks "Account Settings: Read").');
         ctx.log(`  Open ${cyan(LINKS.accountHome)} and copy the address from the browser's address bar.`);
       }
-      accountId = extractAccountId(await ask('  Paste that address, or the Account ID'));
+      accountId = extractAccountId(await ctx.deps.ask('  Paste that address, or the Account ID'));
       if (!accountId) throw new Fail('That does not contain an Account ID (32 letters and digits).');
     }
   }
