@@ -10,7 +10,7 @@ import { githubRepo } from './github.js';
 import { wranglerLogin, wranglerToken } from './wrangler.js';
 import { ago, ask, askSecret, bold, busy, columns, confirm, cyan, dim, fields, green, red, spinner, sym, table, truncate, yellow } from './ui.js';
 
-const NO_GIT_ACCESS = 8000011;
+const NO_GIT_ACCESS = [8000011, 8000012];
 const TAIL_LIMIT_MS = 20 * 60 * 1000;
 const SESSION_TTL_MS = 50 * 60 * 1000;
 const PAGES_STAGES = {
@@ -362,14 +362,13 @@ async function resolveTarget(ctx, s, options) {
 }
 
 function gitAccessHelp(remote, accountId) {
+  const cannotSee = `Cloudflare cannot see ${repoLabel(remote)}: it has no access to it, or it is not pushed yet.`;
   if (remote.type !== 'github') {
-    return [
-      `Cloudflare has no access to ${repoLabel(remote)}.`,
-      `Connect GitLab once at ${LINKS.connectGit(accountId)} and run this again.`,
-    ].join('\n');
+    return [cannotSee, `Connect GitLab once at ${LINKS.connectGit(accountId)} and run this again.`].join('\n');
   }
   return [
-    `Cloudflare has no access to ${repoLabel(remote)}.`,
+    cannotSee,
+    'Nothing was created.',
     '',
     'If Cloudflare is already connected to your GitHub account, add this repository:',
     `  ${LINKS.githubApp}  ->  Cloudflare Workers and Pages  ->  Configure`,
@@ -540,7 +539,7 @@ async function importPages(ctx, s, repo) {
       }),
     );
   } catch (error) {
-    if (error instanceof ApiError && error.has(NO_GIT_ACCESS)) throw new Fail(gitAccessHelp(repo.remote, accountId));
+    if (error instanceof ApiError && NO_GIT_ACCESS.some((code) => error.has(code))) throw new Fail(gitAccessHelp(repo.remote, accountId));
     throw error;
   }
   ctx.log(ok(`Created ${bold(project.name)}`, IN));

@@ -326,7 +326,7 @@ detected settings, and fails with a clear message when it would have to guess.
 
 | Message | Cause and fix |
 |---|---|
-| `Cloudflare has no access to github.com/...` | Step 3 was not done for this repository. Follow the links it prints. |
+| `Cloudflare cannot see github.com/...` | Step 3 was not done for this repository, or it is not pushed yet. Nothing was created; follow the links it prints and run `flareship import` again. |
 | `Not signed in to Cloudflare` | Run `flareship login`. In scripts, set `CLOUDFLARE_API_TOKEN`. |
 | `Authentication error` | An API token is wrong, expired, or lacks **Cloudflare Pages: Edit**. Check `flareship whoami`; a `CLOUDFLARE_API_TOKEN` in the environment wins over the browser sign-in. |
 | `This token cannot find your account by itself` | The token lacks **Account Settings: Read**. Paste a dashboard address when `login --token` asks, or set `CLOUDFLARE_ACCOUNT_ID`. |

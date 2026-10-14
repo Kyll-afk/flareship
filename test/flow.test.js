@@ -55,6 +55,9 @@ before(async () => {
     if (request.method === 'GET' && url.pathname === prefix) return send(200, { success: true, result: state.projects, result_info: { total_pages: 1 } });
     if (request.method === 'POST' && url.pathname === prefix) {
       const wanted = JSON.parse(text);
+      if (wanted.source.config.repo_name === 'hidden') {
+        return send(401, { success: false, errors: [{ code: 8000012, message: 'The project is linked to a repository that no longer exists' }] });
+      }
       if (wanted.source.config.repo_name === state.denyRepo) {
         return send(400, { success: false, errors: [{ code: 8000011, message: 'There is an internal issue with your Cloudflare Pages Git installation.' }] });
       }
@@ -214,9 +217,15 @@ test('import explains what to do when Cloudflare cannot read the repository', as
   const dir = repo('locked', { 'public/index.html': '<html>' });
   const { code, output } = await flareship(dir, ['import', '--yes']);
   assert.equal(code, 1);
-  assert.match(output, /Cloudflare has no access to github\.com\/Acme\/locked/);
+  assert.match(output, /Cloudflare cannot see github\.com\/Acme\/locked/);
+  assert.match(output, /Nothing was created/);
   assert.match(output, /github\.com\/settings\/installations/);
   assert.match(output, new RegExp(`dash\\.cloudflare\\.com/${ACCOUNT}/workers-and-pages/create/pages`));
+
+  const hidden = await flareship(repo('hidden', { 'public/index.html': '<html>' }), ['import', '--yes']);
+  assert.equal(hidden.code, 1);
+  assert.match(hidden.output, /Cloudflare cannot see github\.com\/Acme\/hidden/);
+  assert.match(hidden.output, /github\.com\/settings\/installations/);
 });
 
 test('import refuses to guess when it cannot detect the build and nobody can be asked', async () => {

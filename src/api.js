@@ -14,10 +14,12 @@ export class ApiError extends Error {
 }
 
 const AUTH_CODES = [10000, 10001, 9106, 9109];
+const GIT_ACCESS_CODES = [8000011, 8000012];
 const NO_BUILD_CONFIG = 12040;
 
 export function isAuthError(error) {
-  return error instanceof ApiError && (error.status === 401 || error.status === 403 || AUTH_CODES.some((code) => error.has(code)));
+  if (!(error instanceof ApiError) || GIT_ACCESS_CODES.some((code) => error.has(code))) return false;
+  return error.status === 401 || error.status === 403 || AUTH_CODES.some((code) => error.has(code));
 }
 
 export function createClient({ token, base, refresh, fetchImpl = globalThis.fetch }) {
