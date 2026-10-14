@@ -20,25 +20,30 @@ Cloudflare builds on every push normally has to be done by hand in the dashboard
 
 `--workers` and `--pages` override the choice.
 
+**Status.** This is a 0.x release by one developer, not an official Cloudflare tool. Pages
+support has been exercised end to end against the real API. Workers support is newer and
+has only been tested against a stand-in for the API, so treat it as experimental and please
+report what breaks.
+
 ```
 $ flareship import
 
   1/4  Repository
-       github.com/Kyll-afk/ziffy-site  ·  main
+       github.com/acme/my-site  ·  main
 
   2/4  Cloudflare account
-       2824bd06346d60f4326fddc0142d811c
+       0123456789abcdef0123456789abcdef
 
   3/4  Build settings
        Detected Vite
 
-       Project name (ziffy-site):
+       Project name (my-site):
        Production branch (main):
        Build command, or "none" (npm run build):
        Folder to publish, or "." for the whole repository (dist):
 
-       Project      ziffy-site
-       Repository   github.com/Kyll-afk/ziffy-site
+       Project      my-site
+       Repository   github.com/acme/my-site
        Branch       main  ·  other branches get preview links
        Build        npm run build
        Publish      dist
@@ -46,28 +51,28 @@ $ flareship import
        Create this project? (Y/n)
 
   4/4  Create and publish
-       ✓ Created ziffy-site
-         Every push to main now publishes to https://ziffy-site.pages.dev
-       Building ziffy-site from main
+       ✓ Created my-site
+         Every push to main now publishes to https://my-site.pages.dev
+       Building my-site from main
        │ Cloning repository...
        │ Success: Your site was deployed!
-       ✓ Live at https://ziffy-site.pages.dev
+       ✓ Live at https://my-site.pages.dev
 ```
 
 ```
 $ flareship status
 
-  ziffy-site  ✓ live
-  https://ziffy-site.pages.dev
+  my-site  ✓ live
+  https://my-site.pages.dev
 
-  Repository   github.com/Kyll-afk/ziffy-site
+  Repository   github.com/acme/my-site
   Branch       main
-  Build        python3 tools/dist.py
+  Build        npm run build
   Publish      dist
 
      ID        TARGET      BRANCH  COMMIT   MESSAGE                              WHEN
-  ✓  0c34d148  production  main    c05737b  Drop the GitHub Actions deploy; Cl…  1h ago
-  ✓  fd6fe141  production  main    65dda1f  Ziffy site: scroll-driven tour of …  1h ago
+  ✓  0c34d148  production  main    c05737b  Fix the header on small screens      1h ago
+  ✓  fd6fe141  production  main    65dda1f  Add the landing page                 1h ago
 ```
 
 ## Install
@@ -75,12 +80,13 @@ $ flareship status
 Needs [Node.js](https://nodejs.org) 18.17 or newer and `git`. No other dependencies.
 
 ```bash
-git clone https://github.com/Kyll-afk/flareship.git
-cd flareship
-npm link            # makes the "flareship" command available everywhere
+npm install -g flareship
 ```
 
-Or without installing: `npx github:Kyll-afk/flareship import`.
+Or without installing: `npx flareship import`.
+
+To work on the tool itself, clone <https://github.com/Kyll-afk/flareship>, run `npm link`
+in it, and the `flareship` command points at your checkout.
 
 ## Setup, step by step
 
@@ -259,7 +265,7 @@ Publishing the whole repository makes every file in it public, including scripts
 config. If the site has its own build script, pass it explicitly:
 
 ```bash
-flareship import --build "python3 tools/dist.py" --out dist
+flareship import --build "python3 build.py" --out dist
 ```
 
 ## Options
@@ -373,8 +379,8 @@ The suite runs the real commands against a local stand-in for the Cloudflare and
 | `test/unit.test.js` | Remote URL parsing, name clean-up, build detection, state mapping. |
 
 What the suite cannot prove is that Cloudflare itself behaves like the stand-in. The Pages
-flow has also been run for real, end to end; see the repositories `flareship-test-pages` and
-`flareship-test-worker`.
+flow has also been run for real, end to end. The Workers flow has so far only run against
+the stand-in.
 
 Environment variables that exist for testing and unusual setups:
 
@@ -392,3 +398,7 @@ The Cloudflare API calls are in `src/api.js`. `src/detect.js` holds the build de
 and reads the wrangler config, `src/git.js` reads the repository, `src/github.js` looks up
 repository IDs, `src/wrangler.js` handles the browser sign-in, and `src/commands.js` has one
 function per command, with Pages and Workers behind the same small interface.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).

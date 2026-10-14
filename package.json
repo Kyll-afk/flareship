@@ -9,11 +9,13 @@
   "files": [
     "bin",
     "src",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "test": "node --test",
-    "coverage": "node --test --experimental-test-coverage"
+    "coverage": "node --test --experimental-test-coverage",
+    "prepublishOnly": "node --test"
   },
   "engines": {
     "node": ">=18.17"
@@ -23,7 +25,18 @@
     "pages",
     "workers",
     "deploy",
-    "cli"
+    "git",
+    "cli",
+    "wrangler"
   ],
-  "license": "UNLICENSED"
+  "author": "Kyll-afk",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Kyll-afk/flareship.git"
+  },
+  "homepage": "https://github.com/Kyll-afk/flareship#readme",
+  "bugs": {
+    "url": "https://github.com/Kyll-afk/flareship/issues"
+  }
 }

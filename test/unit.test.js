@@ -21,12 +21,12 @@ function project(files) {
 }
 
 test('parseRemote reads the common GitHub and GitLab forms', () => {
-  const want = { type: 'github', owner: 'Kyll-afk', repo: 'ziffy-site' };
-  assert.deepEqual(parseRemote('https://github.com/Kyll-afk/ziffy-site.git'), want);
-  assert.deepEqual(parseRemote('https://github.com/Kyll-afk/ziffy-site'), want);
-  assert.deepEqual(parseRemote('https://user@github.com/Kyll-afk/ziffy-site.git/'), want);
-  assert.deepEqual(parseRemote('git@github.com:Kyll-afk/ziffy-site.git'), want);
-  assert.deepEqual(parseRemote('ssh://git@github.com/Kyll-afk/ziffy-site.git'), want);
+  const want = { type: 'github', owner: 'Acme-Co', repo: 'my-site' };
+  assert.deepEqual(parseRemote('https://github.com/Acme-Co/my-site.git'), want);
+  assert.deepEqual(parseRemote('https://github.com/Acme-Co/my-site'), want);
+  assert.deepEqual(parseRemote('https://user@github.com/Acme-Co/my-site.git/'), want);
+  assert.deepEqual(parseRemote('git@github.com:Acme-Co/my-site.git'), want);
+  assert.deepEqual(parseRemote('ssh://git@github.com/Acme-Co/my-site.git'), want);
   assert.deepEqual(parseRemote('git@gitlab.com:team/sub/app.git'), { type: 'gitlab', owner: 'team/sub', repo: 'app' });
 });
 
@@ -39,7 +39,7 @@ test('parseRemote rejects hosts Pages cannot connect to', () => {
 });
 
 test('sanitizeName produces a valid Pages project name', () => {
-  assert.equal(sanitizeName('Ziffy_Site'), 'ziffy-site');
+  assert.equal(sanitizeName('My_Site'), 'my-site');
   assert.equal(sanitizeName('--My App!!--'), 'my-app');
   assert.equal(sanitizeName('___'), 'site');
   assert.equal(sanitizeName('a'.repeat(80)).length, 58);
@@ -47,11 +47,11 @@ test('sanitizeName produces a valid Pages project name', () => {
 });
 
 test('extractAccountId accepts a bare ID or any dashboard address', () => {
-  const id = '2824bd06346d60f4326fddc0142d811c';
+  const id = '0123456789abcdef0123456789abcdef';
   assert.equal(extractAccountId(id), id);
   assert.equal(extractAccountId(`  ${id.toUpperCase()}  `), id);
   assert.equal(extractAccountId(`https://dash.cloudflare.com/${id}/workers-and-pages`), id);
-  assert.equal(extractAccountId(`https://dash.cloudflare.com/${id}/pages/view/ziffy-site?tab=settings`), id);
+  assert.equal(extractAccountId(`https://dash.cloudflare.com/${id}/pages/view/my-site?tab=settings`), id);
   assert.equal(extractAccountId('https://dash.cloudflare.com/profile/api-tokens'), null);
   assert.equal(extractAccountId(`${id}0`), null);
   assert.equal(extractAccountId(''), null);
@@ -67,12 +67,12 @@ test('cleanFolder normalises the publish folder', () => {
 test('findProjectForRepo matches owner and repository without caring about case', () => {
   const projects = [
     { name: 'upload-only', source: null },
-    { name: 'other', source: { type: 'github', config: { owner: 'kyll-afk', repo_name: 'other' } } },
-    { name: 'ziffy-site', source: { type: 'github', config: { owner: 'Kyll-afk', repo_name: 'ziffy-site' } } },
+    { name: 'other', source: { type: 'github', config: { owner: 'acme-co', repo_name: 'other' } } },
+    { name: 'my-site', source: { type: 'github', config: { owner: 'Acme-Co', repo_name: 'my-site' } } },
   ];
-  assert.equal(findProjectForRepo(projects, { type: 'github', owner: 'kyll-AFK', repo: 'Ziffy-Site' }).name, 'ziffy-site');
-  assert.equal(findProjectForRepo(projects, { type: 'gitlab', owner: 'Kyll-afk', repo: 'ziffy-site' }), null);
-  assert.equal(findProjectForRepo(projects, { type: 'github', owner: 'Kyll-afk', repo: 'missing' }), null);
+  assert.equal(findProjectForRepo(projects, { type: 'github', owner: 'acme-CO', repo: 'My-Site' }).name, 'my-site');
+  assert.equal(findProjectForRepo(projects, { type: 'gitlab', owner: 'Acme-Co', repo: 'my-site' }), null);
+  assert.equal(findProjectForRepo(projects, { type: 'github', owner: 'Acme-Co', repo: 'missing' }), null);
 });
 
 test('deploymentState follows the build stages', () => {
