@@ -12,7 +12,8 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "coverage": "node --test --experimental-test-coverage"
   },
   "engines": {
     "node": ">=18.17"

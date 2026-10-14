@@ -356,8 +356,37 @@ detected settings, and fails with a clear message when it would have to guess.
 ## Development
 
 ```bash
-npm test      # node --test: unit tests plus the full flow against a local mock of the API
+npm test            # every scenario, about 20 seconds, no network and no Cloudflare account needed
+npm run coverage    # the same, with a per-file coverage table
 ```
+
+The suite runs the real commands against a local stand-in for the Cloudflare and GitHub APIs
+(`support/mock.js`), in throwaway Git repositories, with scripted answers to the prompts.
+
+| File | What it covers |
+|---|---|
+| `test/pages.test.js` | Pages: import (options, prompts, declining, warnings, branches, GitLab, errors, failed and slow builds), deploy, status, logs, open, list. |
+| `test/workers.test.js` | Workers: import (new and existing Worker, options, prompts, every refusal), private repositories, deploy and previews, status, logs, list, and what the browser sign-in may not do. |
+| `test/auth.test.js` | Browser sign-in, the kept session and its renewal, `login --token`, choosing an account, precedence of the environment, `whoami`, `logout`. |
+| `test/cli.test.js` | Arguments, help, version, mistyped commands, error formatting. |
+| `test/internals.test.js` | Prompts and spinner on fake terminals, layout helpers, config files, the wrangler and GitHub helpers run as real processes, the API client. |
+| `test/unit.test.js` | Remote URL parsing, name clean-up, build detection, state mapping. |
+
+What the suite cannot prove is that Cloudflare itself behaves like the stand-in. The Pages
+flow has also been run for real, end to end; see the repositories `flareship-test-pages` and
+`flareship-test-worker`.
+
+Environment variables that exist for testing and unusual setups:
+
+| Variable | Effect |
+|---|---|
+| `FLARESHIP_API_BASE`, `FLARESHIP_GITHUB_API` | Send API calls somewhere else. |
+| `FLARESHIP_CONFIG` | Path of the config file (the session file is kept next to it). |
+| `FLARESHIP_WRANGLER` | Command used for the browser sign-in (default `npx --yes wrangler@4`), for example a locally installed `wrangler`. |
+| `FLARESHIP_NO_WRANGLER` | Never use the browser sign-in. |
+| `FLARESHIP_NO_GIT_CREDENTIALS` | Never look for a GitHub token in `gh` or the Git credential store. |
+| `FLARESHIP_POLL_MS`, `FLARESHIP_TAIL_LIMIT_MS` | How often a build is polled (default 3000) and how long it is followed (default 20 minutes). |
+| `FLARESHIP_NO_BROWSER`, `FLARESHIP_NO_SPINNER`, `FLARESHIP_ASCII` | Do not open the browser, do not animate, use plain symbols. |
 
 The Cloudflare API calls are in `src/api.js`. `src/detect.js` holds the build detection table
 and reads the wrangler config, `src/git.js` reads the repository, `src/github.js` looks up
