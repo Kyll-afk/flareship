@@ -16,11 +16,21 @@ function wrangler(args, { env, inherit = false, timeout } = {}) {
         stdout += chunk;
       });
     }
-    const timer = timeout ? setTimeout(() => child.kill(), timeout) : null;
+    let done = false;
     const finish = (status) => {
+      if (done) return;
+      done = true;
       if (timer) clearTimeout(timer);
       resolve({ status, stdout });
     };
+    const timer = timeout
+      ? setTimeout(() => {
+          finish(1);
+          child.stdout?.destroy();
+          if (process.platform === 'win32') spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { stdio: 'ignore' }).on('error', () => {});
+          else child.kill('SIGKILL');
+        }, timeout)
+      : null;
     child.on('error', () => finish(1));
     child.on('close', (code) => finish(code ?? 1));
   });
