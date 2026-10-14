@@ -832,16 +832,20 @@ async function logsCommand(ctx) {
 async function listCommand(ctx) {
   const s = await session(ctx);
   const { client, accountId, source } = s;
+  const failures = [];
+  const orEmpty = (error) => {
+    if (!isAuthError(error)) throw error;
+    failures.push(error);
+    return [];
+  };
   const [projects, scripts, subdomain] = await busy('Loading your projects', () =>
     Promise.all([
-      client.listProjects(accountId).catch((error) => {
-        if (isAuthError(error)) return [];
-        throw error;
-      }),
-      client.listScripts(accountId).catch(() => []),
+      client.listProjects(accountId).catch(orEmpty),
+      client.listScripts(accountId).catch(orEmpty),
       client.workersSubdomain(accountId).catch(() => null),
     ]),
   );
+  if (failures.length === 2) throw failures[0];
 
   const rows = projects.map((project) => {
     const config = project.source?.config;
@@ -991,13 +995,20 @@ async function logoutCommand(ctx) {
 
 async function whoamiCommand(ctx) {
   const { client, accountId, source } = await session(ctx);
+  const failures = [];
+  const orNull = (error) => {
+    if (!isAuthError(error)) throw error;
+    failures.push(error);
+    return null;
+  };
   const [projects, scripts, builds] = await busy('Loading your account', () =>
     Promise.all([
-      client.listProjects(accountId).then((list) => list.length, () => null),
-      client.listScripts(accountId).then((list) => list.length, () => null),
+      client.listProjects(accountId).then((list) => list.length, orNull),
+      client.listScripts(accountId).then((list) => list.length, orNull),
       source === 'browser' ? false : client.listBuildTokens(accountId).then(() => true, () => false),
     ]),
   );
+  if (failures.length === 2) throw failures[0];
   const how = { env: 'CLOUDFLARE_API_TOKEN', token: `API token saved in ${configPath(ctx.env)}`, browser: 'Cloudflare browser sign-in (wrangler)' }[source];
   ctx.log('');
   const rows = [
